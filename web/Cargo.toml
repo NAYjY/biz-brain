@@ -1,0 +1,23 @@
+[package]
+name = "web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Leptos SSR dashboard (T06). JWT stays server-side; browser never opens a direct connection to `api`."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+domain = { path = "../domain" }
+api = { path = "../api" }
+axum.workspace = true
+tower-http = { version = "0.5", features = ["trace"] }
+tokio-stream = "0.1"
+async-stream = "0.3"
+futures-core = "0.3"
+leptos = { version = "0.6", features = ["ssr"] }

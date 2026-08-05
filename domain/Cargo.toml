@@ -1,0 +1,16 @@
+[package]
+name = "domain"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Pure domain types, Events, state machines. No I/O, no async."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+uuid.workspace = true
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "messaging"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "T04: LINE/WhatsApp webhook ingestion + outbound messaging, one crate with a shared Channel trait."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+domain = { path = "../domain" }
+store = { path = "../store" }
+reqwest = { version = "0.12", features = ["json"] }
+hmac = "0.12"
+sha2 = "0.10"

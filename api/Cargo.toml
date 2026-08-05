@@ -1,0 +1,33 @@
+[package]
+name = "api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Axum HTTP surface for the Owner dashboard (T05) + LINE/WhatsApp webhooks (T04) + SSE (T07)."
+
+[lib]
+path = "src/lib.rs"
+
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+domain = { path = "../domain" }
+store = { path = "../store" }
+agent = { path = "../agent" }
+messaging = { path = "../messaging" }
+axum = { workspace = true, features = ["macros"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+jsonwebtoken = "9"
+async-trait = "0.1"
+sqlx.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tokio-stream = "0.1"
+async-stream = "0.3"
+futures-core = "0.3"
+tracing = "0.1"
+tracing-subscriber = "0.3"

@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bizbrain
+      POSTGRES_PASSWORD: bizbrain
+      POSTGRES_DB: bizbrain
+    ports:
+      - "5432:5432"
+    volumes:
+      - bizbrain_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bizbrain -d bizbrain"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  bizbrain_pgdata:

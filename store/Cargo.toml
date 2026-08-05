@@ -1,0 +1,19 @@
+[package]
+name = "store"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Postgres event log (T02) and read models via sqlx."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+uuid.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+domain = { path = "../domain" }
+sqlx.workspace = true

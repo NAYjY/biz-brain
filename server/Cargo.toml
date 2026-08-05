@@ -1,0 +1,22 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Top-level binary (T06): composes api + web into one Axum Router, one process, one deploy artifact."
+
+[[bin]]
+name = "biz-brain-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+sqlx.workspace = true
+axum.workspace = true
+api = { path = "../api" }
+web = { path = "../web" }
+messaging = { path = "../messaging" }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dotenvy = "0.15"
