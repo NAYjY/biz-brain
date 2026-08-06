@@ -9,7 +9,7 @@ use axum::{
     http::{request::Parts, StatusCode},
     RequestPartsExt,
 };
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -47,7 +47,16 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthedOwner {
 
         let secret = std::env::var("JWT_SECRET").map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "JWT_SECRET unset"))?;
 
-        let data = decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default())
+        let mut validation = Validation::new(Algorithm::HS256);
+        // S02: Enforce signature checking on all requests;
+        // do not relax these conditions — they are the trust boundary.
+        validation.leeway = 0; // No clock skew tolerance for security-sensitive tokens
+        // By default, JWT requires nbf and exp claims if present,
+        // so we don't need to explicitly enable those checks here.
+        // Do NOT set iat_required = true — that would cause valid tokens
+        // to be rejected when a future is pushed to the database and then
+        // fetched again (see R03 in CODE_REVIEW_REPORT.md).
+        let data = decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &validation)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid or expired token"))?;
 
         Ok(AuthedOwner(data.claims))
