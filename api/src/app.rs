@@ -2,6 +2,9 @@
 //! per Owner-triggerable `DomainEvent` variant for writes, all Branch-scoped
 //! under `/branches/:branch_id/...`. Plus T04's webhook routes and T07's
 //! per-Branch SSE stream.
+//!
+//! S05: security headers (CSP, X-Frame-Options, X-Content-Type-Options)
+//! applied to every response via tower-http middleware.
 
 use axum::{
     routing::{get, post},
@@ -9,11 +12,8 @@ use axum::{
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{routes, state::AppState};
+use crate::{routes, security_headers, state::AppState};
 
-/// Returns an unmounted `Router<AppState>` — the `server` binary crate merges
-/// this with `web`'s routes and calls `.with_state(...)` exactly once, since
-/// both crates' routes share the same `AppState` (T06: single process).
 pub fn build_router() -> Router<AppState> {
     let api_v1 = Router::new()
         .route("/branches/:branch_id/orders", get(routes::orders::list_orders).post(routes::orders::create_order))
@@ -33,9 +33,28 @@ pub fn build_router() -> Router<AppState> {
         .route("/webhooks/line", post(routes::webhooks::line_webhook))
         .route("/webhooks/whatsapp", get(routes::webhooks::whatsapp_verify).post(routes::webhooks::whatsapp_webhook));
 
+    // S06: Owner-facing actor binding management endpoints
+    let actor_mgmt = Router::new()
+        .route(
+            "/branches/:branch_id/actors/pending",
+            get(routes::actors::list_pending_bindings),
+        )
+        .route(
+            "/branches/:branch_id/actors/:actor_id/confirm",
+            post(routes::actors::confirm_binding),
+        )
+        .route(
+            "/branches/:branch_id/actors/:actor_id/reject",
+            post(routes::actors::reject_binding),
+        );
+
     Router::new()
-        .nest("/api/v1", api_v1)
+        .nest("/api/v1", api_v1.merge(actor_mgmt))
         .merge(webhooks)
+        // S05: security headers on every response
+        .layer(security_headers::csp_layer())
+        .layer(security_headers::x_frame_options_layer())
+        .layer(security_headers::x_content_type_options_layer())
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive()) // TODO: tighten before deploy — permissive is a placeholder, not a decision
+        .layer(CorsLayer::permissive()) // TODO: tighten before deploy
 }

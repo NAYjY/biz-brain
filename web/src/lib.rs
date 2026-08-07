@@ -14,4 +14,6 @@ pub fn build_router() -> Router<AppState> {
     Router::new()
         .route("/", get(routes::dashboard::render_dashboard))
         .route("/branches/:branch_id/events", get(routes::sse_relay::relay_branch_events))
-}
+        // S04: logout invalidates all sessions for this Owner
+        .route("/logout", post(routes::logout::logout))
+    }
