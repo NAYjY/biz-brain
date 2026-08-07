@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Leptos SSR dashboard (T06). JWT stays server-side; browser never opens a direct connection to `api`."
+description = "SSR dashboard (D01-D07). JWT stays server-side; browser fetches /api/v1/* for data."
 
 [lib]
 path = "src/lib.rs"
@@ -14,10 +14,17 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 domain = { path = "../domain" }
+store = { path = "../store" }
 api = { path = "../api" }
-axum.workspace = true
+axum = { workspace = true, features = ["macros"] }
+axum-extra = { version = "0.9", features = ["cookie"] }
 tower-http = { version = "0.5", features = ["trace"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures-core = "0.3"
-leptos = { version = "0.6", features = ["ssr"] }
+jsonwebtoken = "9"
+bcrypt = "0.15"
+time = "0.3"
+uuid.workspace = true
+chrono.workspace = true
+sqlx.workspace = true
