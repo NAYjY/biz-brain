@@ -1,30 +1,37 @@
-//! T06: Leptos SSR. JWT stays server-side in the httpOnly cookie (checked by
-//! `api`'s extractors when the browser calls `/api/v1/...`); this route only
-//! renders the page shell — data fetching happens client-side against the
-//! same-origin `/api/v1` routes, cookie attached automatically by the browser.
+//! D02/D03: Root `/` handler. Decodes cookie and redirects to the Owner's
+//! first Branch orders page. No standalone "dashboard" view — Orders and
+//! SupplyRequests are the dashboard (separate pages per D03).
 
-use axum::response::Html;
-use leptos::*;
+use axum::{
+    extract::State,
+    response::{IntoResponse, Redirect, Response},
+};
+use axum_extra::extract::CookieJar;
+use jsonwebtoken::{decode, DecodingKey, Validation};
 
-#[component]
-fn DashboardShell() -> impl IntoView {
-    view! {
-        <html lang="en">
-            <head>
-                <meta charset="utf-8"/>
-                <title>"Biz-Brain"</title>
-            </head>
-            <body>
-                <div id="app">"Biz-Brain Dashboard"</div>
-                // Client-side JS (not built here) hydrates this shell, calling
-                // /api/v1/branches/:id/orders etc. directly — same-origin, so
-                // the httpOnly cookie rides along without any JS ever reading it.
-            </body>
-        </html>
+use api::{extractors::Claims, AppState};
+
+pub async fn render_dashboard(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Response {
+    // No cookie -> login.
+    let Some(token) = jar.get("auth").map(|c| c.value().to_string()) else {
+        return Redirect::to("/login").into_response();
+    };
+
+    let secret = std::env::var("JWT_SECRET").unwrap_or_default();
+    let Ok(data) = decode::<Claims>(&token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default()) else {
+        return Redirect::to("/login").into_response();
+    };
+
+    let claims = data.claims;
+
+    // First owned Branch -> orders. If none, need to create one first.
+    if let Some(&branch_id) = claims.branch_ids.first() {
+        Redirect::to(&format!("/branches/{branch_id}/orders")).into_response()
+    } else {
+        // Owner has no branches yet — show a minimal setup page.
+        Redirect::to("/setup").into_response()
     }
-}
-
-pub async fn render_dashboard() -> Html<String> {
-    let html = leptos::ssr::render_to_string(DashboardShell);
-    Html(format!("<!DOCTYPE html>{html}"))
 }

@@ -1,19 +1,31 @@
-//! Web crate (T06): Leptos SSR dashboard, plus T07's browser-facing SSE
-//! relay. Returns `Router<AppState>` for the same reason `api::build_router`
-//! does — the `server` crate merges both and calls `.with_state` once.
+//! Web crate (T06 / D01-D07): Leptos-thin SSR dashboard.
+//! JWT stays server-side in httpOnly cookie; browser calls /api/v1/* for data.
+//! D03: initial page renders query projection tables directly (no api loopback).
 
 #![warn(clippy::all)]
 
+pub mod auth;
 pub mod routes;
+pub mod templates;
 
-use axum::{routing::get, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 
 use api::AppState;
 
 pub fn build_router() -> Router<AppState> {
     Router::new()
-        .route("/", get(routes::dashboard::render_dashboard))
-        .route("/branches/:branch_id/events", get(routes::sse_relay::relay_branch_events))
-        // S04: logout invalidates all sessions for this Owner
+        // D01: login / logout
+        .route("/login", get(routes::login::render_login).post(routes::login::handle_login))
         .route("/logout", post(routes::logout::logout))
-    }
+        // D02: root redirects to first branch (dashboard picks up from there)
+        .route("/", get(routes::dashboard::render_dashboard))
+        // D04: Orders page
+        .route("/branches/:branch_id/orders", get(routes::orders::render_orders))
+        // D05: Supply Requests page
+        .route("/branches/:branch_id/supply-requests", get(routes::supply_requests::render_supply_requests))
+        // T07: browser-facing SSE relay
+        .route("/branches/:branch_id/events", get(routes::sse_relay::relay_branch_events))
+}
