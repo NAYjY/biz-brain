@@ -30,7 +30,10 @@ pub async fn render_orders(
     // D03: first paint queries projection table directly (server-side).
     let orders = match state.projections.orders_by_branch(branch_id).await {
         Ok(rows) => rows,
-        Err(_) => return page_not_found(),
+        Err(e) => {
+            eprintln!("orders query failed: {e:?}");
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "DB error").into_response();
+        },
     };
 
     let orders_rows_html = if orders.is_empty() {
@@ -130,13 +133,13 @@ pub async fn render_orders(
 <script src="/static/js/live.js"></script>
 <script src="/static/js/orders.js"></script>
 <script>initOrdersPage('{branch_id}');</script>
-{}
+{shell_close}
 "#,
         shell_open("Orders — Biz-Brain"),
         topbar = topbar_html(branch_id, "orders"),
         orders_rows_html = orders_rows_html,
         branch_id = branch_id,
-        shell_close()
+        shell_close = shell_close(),
     );
 
     Html(html).into_response()

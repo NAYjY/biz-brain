@@ -41,9 +41,9 @@ impl ProjectionTables {
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
-            INSERT INTO order_current_state (id, branch_id, customer_id, description, state)
+            INSERT INTO order_current_state (order_id, branch_id, customer_id, description, state)
             VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
+            ON CONFLICT (order_id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
             "#,
         )
         .bind(id.into_inner())
@@ -65,9 +65,9 @@ impl ProjectionTables {
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
-            INSERT INTO supply_request_current_state (id, branch_id, description, state)
+            INSERT INTO supply_request_current_state (supply_request_id, branch_id, description, state)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
+            ON CONFLICT (supply_request_id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
             "#,
         )
         .bind(id.into_inner())
@@ -80,14 +80,13 @@ impl ProjectionTables {
     }
 
     pub async fn orders_by_branch(&self, branch_id: Uuid) -> Result<Vec<OrderCurrentState>, sqlx::Error> {
-        sqlx::query_as("SELECT id, branch_id, customer_id, description, state FROM order_current_state WHERE branch_id = $1 ORDER BY updated_at DESC")
-            .bind(branch_id)
+        sqlx::query_as("SELECT order_id AS id, branch_id, customer_id, description, state FROM order_current_state WHERE branch_id = $1 ORDER BY updated_at DESC")            .bind(branch_id)
             .fetch_all(&self.pool)
             .await
     }
 
     pub async fn supply_requests_by_branch(&self, branch_id: Uuid) -> Result<Vec<SupplyRequestCurrentState>, sqlx::Error> {
-        sqlx::query_as("SELECT id, branch_id, description, state FROM supply_request_current_state WHERE branch_id = $1 ORDER BY updated_at DESC")
+        sqlx::query_as("SELECT supply_request_id AS id, branch_id, description, state FROM supply_request_current_state WHERE branch_id = $1 ORDER BY updated_at DESC")
             .bind(branch_id)
             .fetch_all(&self.pool)
             .await

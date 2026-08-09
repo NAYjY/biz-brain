@@ -15,6 +15,10 @@ use uuid::Uuid;
 
 use domain::SseSignal;
 
+
+use axum::extract::FromRef;
+
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
@@ -33,6 +37,12 @@ pub struct AppState {
     /// T07: one broadcast channel per Branch. Lazily created on first
     /// subscriber/publish (a Branch with no open dashboard tab needs none).
     pub sse_branches: Arc<Mutex<HashMap<Uuid, broadcast::Sender<SseSignal>>>>,
+}
+
+impl FromRef<AppState> for PgPool {
+    fn from_ref(state: &AppState) -> PgPool {
+        state.pool.clone()
+    }
 }
 
 impl AppState {

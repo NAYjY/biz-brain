@@ -112,7 +112,7 @@ fn issue_jwt_cookie(
     let cookie = Cookie::build(("auth", token))
         .path("/")
         .http_only(true)
-        .secure(true)
+        .secure(std::env::var("APP_ENV").as_deref() == Ok("production")) // only Secure in prod
         .same_site(SameSite::Lax)
         .max_age(Duration::days(COOKIE_LIFETIME_DAYS))
         .build();

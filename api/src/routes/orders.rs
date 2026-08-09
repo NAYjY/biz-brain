@@ -54,12 +54,9 @@ pub async fn create_order(
         .bind(&req.description)
         .execute(&state.pool)
         .await
-        .map_err(internal)?;
+        .map_err(|e| { eprintln!("INSERT orders failed: {e}"); internal(e) })?;
 
-    // Seed the projection row immediately at Unassigned — no events exist
-    // yet for this Order, so the projection worker has nothing to replay.
-    state
-        .projections
+    state.projections
         .upsert_order_state(
             domain::OrderId::new(id),
             branch_id,
@@ -68,11 +65,12 @@ pub async fn create_order(
             domain::OrderState::Unassigned,
         )
         .await
-        .map_err(internal)?;
+        .map_err(|e| { eprintln!("upsert_order_state failed: {e}"); internal(e) })?;
 
     Ok((StatusCode::CREATED, Json(CreateOrderResponse { id })))
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
+    eprintln!("INTERNAL ERROR: {e}");
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }

@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = api::build_router()
         .merge(web::build_router())
         // D07: serve CSS/JS static assets from web/static/
-        .nest_service("/static", ServeDir::new("web/static"))
+        .nest_service("/static", ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../web/static")))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;

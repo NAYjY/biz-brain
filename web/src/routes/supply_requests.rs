@@ -36,7 +36,7 @@ pub async fn render_supply_requests(
             .collect::<Vec<_>>()
             .join("\n")
     };
-
+    
     let html = format!(
         r#"{}
 {topbar}
@@ -121,12 +121,12 @@ pub async fn render_supply_requests(
 <script src="/static/js/live.js"></script>
 <script src="/static/js/supply_requests.js"></script>
 <script>initSupplyRequestsPage('{branch_id}');</script>
-{}"#,
+{shell_close}"#,
         shell_open("Supply Requests — Biz-Brain"),
         topbar = topbar_html(branch_id, "supply-requests"),
         rows_html = rows_html,
         branch_id = branch_id,
-        shell_close()
+        shell_close = shell_close(),
     );
 
     Html(html).into_response()
