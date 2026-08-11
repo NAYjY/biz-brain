@@ -1,5 +1,6 @@
 /**
  * D05: Supply Requests page — client-side logic.
+ * D08-4: Send button for DRAFT state rows.
  * D03 pattern: SupplyRequestChanged signal -> re-fetch whole list.
  * Approve-Invoice: confirm-before-submit (D05: financial commitment).
  */
@@ -19,6 +20,8 @@ function initSupplyRequestsPage(branchId) {
   // ── Initial loaders ──────────────────────────────────────────────── //
 
   loadInFlightOrders();
+  // D08-3 equivalent: attach actions to SSR rows immediately
+  attachRowActions();
 
   // ── List refresh ─────────────────────────────────────────────────── //
 
@@ -39,7 +42,6 @@ function initSupplyRequestsPage(branchId) {
 
   function srRowHtml(sr) {
     const pill = BB.statePill(sr.state);
-    // order_ids denormalized on the row (T02/D05 resolution).
     const chips = (sr.order_ids ?? [])
       .map(id => `<a href="/branches/${branchId}/orders" class="chip" title="${id}">${BB.shortId(id)}</a>`)
       .join('');
@@ -65,6 +67,15 @@ function initSupplyRequestsPage(branchId) {
 
     container.innerHTML = '';
 
+    // D08-4: Send button for DRAFT state
+    if (state === 'DRAFT') {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn--primary btn--sm';
+      btn.textContent = 'Send to Supplier';
+      btn.onclick = () => sendSupplyRequest(srId);
+      container.appendChild(btn);
+    }
+
     if (state === 'INVOICE_RECEIVED') {
       const btn = approveBtn(srId);
       container.appendChild(btn);
@@ -77,6 +88,23 @@ function initSupplyRequestsPage(branchId) {
     b.textContent = 'Approve Invoice';
     b.onclick = () => openApproveInvoice(srId);
     return b;
+  }
+
+  // D08-4: Send supply request to supplier
+  async function sendSupplyRequest(srId) {
+    const ok = await BB.confirm(
+      'Send this supply request to the Supplier? They will receive it via WhatsApp.'
+    );
+    if (!ok) return;
+
+    try {
+      await api(`/supply-requests/${srId}/send`, { method: 'POST' });
+      BB.showToast('Supply request sent', 'success');
+      // SSE signal will trigger re-fetch; also refresh immediately
+      await refreshList();
+    } catch (e) {
+      BB.showToast(`Send failed: ${e.message}`, 'error');
+    }
   }
 
   // ── Create Supply Request ─────────────────────────────────────────── //
@@ -102,7 +130,7 @@ function initSupplyRequestsPage(branchId) {
     }
   });
 
-  // ── Approve Invoice (confirm-before-submit, D05: financial commitment) //
+  // ── Approve Invoice ───────────────────────────────────────────────── //
 
   async function openApproveInvoice(srId) {
     pendingApproveSupplyRequestId = srId;
@@ -126,7 +154,6 @@ function initSupplyRequestsPage(branchId) {
       });
       BB.closeModal('approve-invoice-modal');
       BB.showToast('Invoice approved', 'success');
-      // SSE will trigger re-fetch; also refresh immediately.
       await refreshList();
     } catch (e) {
       BB.showToast(`Approve failed: ${e.message}`, 'error');

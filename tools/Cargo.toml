@@ -1,0 +1,18 @@
+[package]
+name = "tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Dev tooling — seed script, etc."
+
+[[bin]]
+name = "seed"
+path = "src/seed.rs"
+
+[dependencies]
+tokio.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+bcrypt = "0.15"
+dotenvy = "0.15"

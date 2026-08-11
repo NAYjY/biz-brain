@@ -1,6 +1,7 @@
 /**
  * D04: Orders page — client-side logic.
- * D03 pattern: SSE signal -> re-fetch whole list -> re-render tbody.
+ * D08-2: load customer id->name map; use name in row render.
+ * D08-3: call attachRowActions on SSR rows at DOMContentLoaded, not only after re-fetch.
  * Confirm-before-submit for Assign-Worker and Close (D04 resolution).
  */
 
@@ -10,8 +11,13 @@ function initOrdersPage(branchId) {
   // ── State ────────────────────────────────────────────────────────── //
 
   let pendingAssignOrderId = null;
+  // D08-2: id -> name map populated by loadCustomers()
+  let customerMap = {};
 
-  // ── Initial data loads ───────────────────────────────────────────── //
+  // ── On load ──────────────────────────────────────────────────────── //
+
+  // D08-3: attach actions to SSR-rendered rows immediately
+  attachRowActions();
 
   loadCustomers();
   loadWorkers();
@@ -23,7 +29,7 @@ function initOrdersPage(branchId) {
     .on('OrderChanged', () => refreshOrderList())
     .connect();
 
-  // ── Order list refresh (D03: whole-list re-fetch on signal) ──────── //
+  // ── Order list refresh ───────────────────────────────────────────── //
 
   async function refreshOrderList() {
     let orders;
@@ -40,19 +46,24 @@ function initOrdersPage(branchId) {
     attachRowActions();
   }
 
+  // D08-2: use customerMap for display name
   function orderRowHtml(o) {
     const pill = BB.statePill(o.state);
-    const worker = o.worker_id ? `<span class="font-mono text-xs">${BB.shortId(o.worker_id)}</span>` : '—';
+    const customerName = BB.escapeHtml(customerMap[o.customer_id] || BB.shortId(o.customer_id));
+    const worker = o.worker_id
+      ? `<span class="font-mono text-xs">${BB.shortId(o.worker_id)}</span>`
+      : '—';
     return `
       <tr data-order-id="${o.id}">
         <td>${pill}</td>
         <td>${BB.escapeHtml(o.description)}</td>
-        <td class="text-muted font-mono text-xs">${BB.shortId(o.customer_id)}</td>
+        <td class="text-muted text-sm">${customerName}</td>
         <td class="text-muted text-xs">${worker}</td>
         <td><div class="order-actions" data-order-id="${o.id}" style="display:flex;gap:.5rem;"></div></td>
       </tr>`;
   }
 
+  // D08-3: shared fn called both at init and after re-fetch
   function attachRowActions() {
     document.querySelectorAll('.order-actions').forEach(renderActions);
   }
@@ -101,7 +112,6 @@ function initOrdersPage(branchId) {
 
     let customerId = customerEl.value;
 
-    // Inline create customer if new-customer-row visible + name provided.
     const newName = newNameEl.value.trim();
     if (newName) {
       try {
@@ -122,14 +132,13 @@ function initOrdersPage(branchId) {
       descEl.value = '';
       newNameEl.value = '';
       document.getElementById('new-customer-row').style.display = 'none';
-      // SSE will trigger re-fetch, but also refresh immediately for responsiveness.
       await refreshOrderList();
     } catch (e) {
       BB.showToast(`Create order failed: ${e.message}`, 'error');
     }
   });
 
-  // ── Assign Worker (confirm-before-submit, D04 resolution) ────────── //
+  // ── Assign Worker ────────────────────────────────────────────────── //
 
   function openAssignWorker(orderId) {
     pendingAssignOrderId = orderId;
@@ -157,7 +166,7 @@ function initOrdersPage(branchId) {
     }
   });
 
-  // ── Close Order (confirm-before-submit, D04 resolution) ─────────── //
+  // ── Close Order ──────────────────────────────────────────────────── //
 
   async function closeOrder(orderId) {
     const ok = await BB.confirm('Close this order? This marks it as Done.');
@@ -173,9 +182,13 @@ function initOrdersPage(branchId) {
 
   // ── Data loaders ─────────────────────────────────────────────────── //
 
+  // D08-2: build id->name map on load
   async function loadCustomers() {
     try {
       const customers = await api('/customers');
+      customerMap = {};
+      customers.forEach(c => { customerMap[c.id] = c.name; });
+
       const sel = document.getElementById('order-customer');
       sel.innerHTML = '<option value="">Select customer…</option>' +
         customers.map(c => `<option value="${c.id}">${BB.escapeHtml(c.name)}</option>`).join('');
