@@ -474,3 +474,28 @@ a:hover { text-decoration: underline; }
 .text-xs    { font-size: var(--text-xs); }
 .font-mono  { font-family: monospace; }
 .hidden     { display: none !important; }
+
+/* D08-5: channel badge — used on actors page */
+.channel-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* LINE: green-ish */
+.channel-badge--line {
+  background: #0d2e1a;
+  color: #4caf7d;
+}
+
+/* WhatsApp: teal-ish */
+.channel-badge--whats-app {
+  background: #0d2328;
+  color: #3cb8c4;
+}

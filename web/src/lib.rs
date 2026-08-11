@@ -26,6 +26,8 @@ pub fn build_router() -> Router<AppState> {
         .route("/branches/:branch_id/orders", get(routes::orders::render_orders))
         // D05: Supply Requests page
         .route("/branches/:branch_id/supply-requests", get(routes::supply_requests::render_supply_requests))
+        // D08-5: Actors (pending Worker/Supplier bindings) page
+        .route("/branches/:branch_id/actors", get(routes::actors::render_actors))
         // T07: browser-facing SSE relay
         .route("/branches/:branch_id/events", get(routes::sse_relay::relay_branch_events))
 }
