@@ -1,19 +1,17 @@
 //! T04's async processing step: drains `webhook_inbox`, resolves the sender
 //! to a Worker/Supplier, hands the message to `agent` (T03), and appends any
-//! resulting `DomainEvent`. This is the only place `agent` is invoked from —
-//! never the webhook handler itself (T04's sync-vs-async resolution).
+//! resulting `DomainEvent`. This is the only place `agent` is invoked from.
 //!
-//! S06: unknown senders are registered as pending bindings (not auto-trusted)
-//! and Owner is alerted. Message is dropped until Owner confirms the binding.
+//! After appending each event, calls `event_handler::fan_out` to push
+//! notifications to the relevant Worker/Supplier via LINE/WhatsApp.
 
 use std::time::Duration;
 
 use agent::InterpretationOutcome;
 use domain::{BranchId, Channel, ChannelIdentity, DomainEvent};
 use messaging::ChannelAdapter;
-use store::actor_directory::ActorType;
 
-use crate::state::AppState;
+use crate::{event_handler, state::AppState};
 
 pub async fn run(state: AppState) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -27,15 +25,12 @@ pub async fn run(state: AppState) {
 
 async fn process_batch(state: &AppState) -> Result<(), sqlx::Error> {
     let rows = state.inbox.fetch_unprocessed(50).await?;
-
     for row in rows {
         if let Err(e) = process_row(state, &row).await {
             tracing::error!("failed to process webhook_inbox row {}: {e}", row.id);
         }
-        // T03: drop, don't retry — mark processed regardless of outcome.
         let _ = state.inbox.mark_processed(row.id).await;
     }
-
     Ok(())
 }
 
@@ -57,19 +52,6 @@ async fn process_worker_message(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match state.actors.resolve_worker(sender).await? {
         None => {
-            // S06: unknown or unconfirmed sender — register pending, alert Owner.
-            // Do NOT auto-provision. Message dropped until Owner confirms.
-            tracing::warn!(
-                "Unknown Worker identity {:?} — registering pending binding, alerting Owner",
-                sender
-            );
-            // We don't have a WorkerId yet (no auto-provision), so we generate
-            // a placeholder UUID. Owner will link to real Worker via dashboard.
-            let placeholder_actor_id = uuid::Uuid::new_v4();
-            // branch_id: best-effort from inbox row (not always available at this layer;
-            // a real impl would join against a branch lookup table).
-            // For now: log the alert and skip the register_pending call if branch unknown.
-            // TODO: carry branch_id through webhook_inbox for this lookup.
             tracing::error!(
                 "OWNER ALERT (urgent): unrecognized LINE sender {:?}. \
                  Confirm binding in dashboard before messages will be processed.",
@@ -87,7 +69,9 @@ async fn process_worker_message(
             };
 
             match outcome {
-                InterpretationOutcome::Event(event) => append_order_event(state, event).await,
+                InterpretationOutcome::Event(event) => {
+                    append_order_event(state, event).await
+                }
                 InterpretationOutcome::NeedsOrderDisambiguation { question, .. } => {
                     state.line.send_push(sender, &question).await?;
                     Ok(())
@@ -108,7 +92,6 @@ async fn process_supplier_message(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match state.actors.resolve_supplier(sender).await? {
         None => {
-            // S06: same fail-closed posture as Worker path.
             tracing::error!(
                 "OWNER ALERT (urgent): unrecognized WhatsApp sender {:?}. \
                  Confirm binding in dashboard before messages will be processed.",
@@ -119,7 +102,9 @@ async fn process_supplier_message(
         Some(_supplier_id) => {
             let outcome = state.supplier_agent.interpret(text).await?;
             match outcome {
-                InterpretationOutcome::Event(event) => append_supply_request_event(state, event).await,
+                InterpretationOutcome::Event(event) => {
+                    append_supply_request_event(state, event).await
+                }
                 InterpretationOutcome::Unprocessed { reason } => {
                     tracing::warn!("OWNER ALERT (urgent): Supplier message unprocessed — {reason}");
                     Ok(())
@@ -142,13 +127,18 @@ async fn append_order_event(state: &AppState, event: DomainEvent) -> Result<(), 
         .await?;
 
     state.event_sourcing.append(BranchId::new(branch_id.0), seq + 1, &event).await?;
+
+    // Fan out notifications AFTER event is stored
+    event_handler::fan_out(state, &event).await;
+
     let signal = state.projection_worker.project_order(order_id).await?;
     state.publish_sse(signal).await;
     Ok(())
 }
 
 async fn append_supply_request_event(state: &AppState, event: DomainEvent) -> Result<(), Box<dyn std::error::Error>> {
-    let supply_request_id = event.supply_request_id().expect("Supplier-agent events are always SupplyRequest-aggregate");
+    let supply_request_id = event.supply_request_id()
+        .expect("Supplier-agent events are always SupplyRequest-aggregate");
     let seq = state.supply_request_events.current_sequence(supply_request_id).await?;
 
     let branch_id: (uuid::Uuid,) = sqlx::query_as("SELECT branch_id FROM supply_requests WHERE id = $1")
@@ -157,6 +147,10 @@ async fn append_supply_request_event(state: &AppState, event: DomainEvent) -> Re
         .await?;
 
     state.event_sourcing.append(BranchId::new(branch_id.0), seq + 1, &event).await?;
+
+    // Fan out notifications AFTER event is stored
+    event_handler::fan_out(state, &event).await;
+
     let signal = state.projection_worker.project_supply_request(supply_request_id).await?;
     state.publish_sse(signal).await;
     Ok(())

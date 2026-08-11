@@ -1,7 +1,6 @@
 //! T05: one command endpoint per `DomainEvent` variant the Owner can
-//! trigger directly — `WorkerAssigned` (assign a Worker), `OrderDone`
-//! (Owner closes the Order), `InvoiceApproved` (Owner approves price/list).
-//! Everything else in the enum originates from the Agent (T03), never here.
+//! trigger directly. After storing each event, calls event_handler::fan_out
+//! so Workers/Suppliers receive their LINE/WhatsApp push.
 
 use axum::{
     extract::{Path, State},
@@ -13,7 +12,7 @@ use uuid::Uuid;
 
 use domain::{BranchId, DomainEvent, InvoiceId, OrderId, WorkerId};
 
-use crate::{extractors::AuthorizedBranch, state::AppState};
+use crate::{event_handler, extractors::AuthorizedBranch, state::AppState};
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
@@ -32,10 +31,11 @@ pub async fn assign_worker(
     Json(req): Json<AssignWorkerRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let order_id = path_uuid(&params, "order_id")?;
-    let order_id = OrderId::new(order_id);
-
-    let event = DomainEvent::WorkerAssigned { worker_id: WorkerId::new(req.worker_id), order_id };
-    append_and_project_order(&state, BranchId::new(branch_id), order_id, event).await
+    let event = DomainEvent::WorkerAssigned {
+        worker_id: WorkerId::new(req.worker_id),
+        order_id: OrderId::new(order_id),
+    };
+    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
 /// `POST /branches/:branch_id/orders/:order_id/close`
@@ -45,10 +45,8 @@ pub async fn close_order(
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let order_id = path_uuid(&params, "order_id")?;
-    let order_id = OrderId::new(order_id);
-
-    let event = DomainEvent::OrderDone { order_id };
-    append_and_project_order(&state, BranchId::new(branch_id), order_id, event).await
+    let event = DomainEvent::OrderDone { order_id: OrderId::new(order_id) };
+    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,10 +64,16 @@ pub async fn approve_invoice(
     let supply_request_id = path_uuid(&params, "supply_request_id")?;
     let supply_request_id = domain::SupplyRequestId::new(supply_request_id);
 
-    let event = DomainEvent::InvoiceApproved { invoice_id: InvoiceId::new(req.invoice_id), branch_id: BranchId::new(branch_id) };
+    let event = DomainEvent::InvoiceApproved {
+        invoice_id: InvoiceId::new(req.invoice_id),
+        branch_id: BranchId::new(branch_id),
+    };
 
     let seq = state.supply_request_events.current_sequence(supply_request_id).await.map_err(internal)?;
     state.event_sourcing.append(BranchId::new(branch_id), seq + 1, &event).await.map_err(internal)?;
+
+    // Fan out: Supplier gets WhatsApp push "invoice approved"
+    event_handler::fan_out(&state, &event).await;
 
     let signal = state.projection_worker.project_supply_request(supply_request_id).await.map_err(internal)?;
     state.publish_sse(signal).await;
@@ -86,13 +90,19 @@ async fn append_and_project_order(
     let seq = state.order_events.current_sequence(order_id).await.map_err(internal)?;
     state.event_sourcing.append(branch_id, seq + 1, &event).await.map_err(internal)?;
 
+    // Fan out: WorkerAssigned sends LINE push to Worker
+    event_handler::fan_out(state, &event).await;
+
     let signal = state.projection_worker.project_order(order_id).await.map_err(internal)?;
     state.publish_sse(signal).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn path_uuid(params: &std::collections::HashMap<String, String>, key: &str) -> Result<Uuid, (StatusCode, String)> {
+fn path_uuid(
+    params: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Result<Uuid, (StatusCode, String)> {
     params
         .get(key)
         .ok_or((StatusCode::BAD_REQUEST, format!("missing {key} in path")))?
