@@ -77,6 +77,7 @@ async fn send_to_identity(state: &AppState, identity: &ChannelIdentity, text: &s
     let result = match identity.channel {
         Channel::Line => state.line.send_push(identity, text).await,
         Channel::WhatsApp => state.whatsapp.send_push(identity, text).await,
+        Channel::Telegram => state.telegram.send_push(identity, text).await,
     };
     if let Err(e) = result {
         tracing::error!("push to {:?} failed: {e}", identity);
@@ -171,6 +172,7 @@ fn parse_channel(s: &str) -> Result<Channel, Box<dyn std::error::Error>> {
     match s {
         "line" => Ok(Channel::Line),
         "whats_app" => Ok(Channel::WhatsApp),
+        "telegram" => Ok(Channel::Telegram),
         other => Err(format!("unknown channel: {other}").into()),
     }
 }

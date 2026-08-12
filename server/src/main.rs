@@ -2,7 +2,7 @@
 //! Merges api + web routes, attaches shared AppState, serves static assets.
 
 use api::AppState;
-use messaging::{LineAdapter, WhatsAppAdapter};
+use messaging::{LineAdapter, WhatsAppAdapter, TelegramAdapter};
 use tower_http::services::ServeDir;
 
 #[tokio::main]
@@ -23,9 +23,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("WHATSAPP_ACCESS_TOKEN")?,
         std::env::var("WHATSAPP_PHONE_NUMBER_ID")?,
     );
+    let telegram = TelegramAdapter::new(
+        std::env::var("TELEGRAM_SECRET_TOKEN")?,
+        std::env::var("TELEGRAM_BOT_TOKEN")?,
+    );
     let claude_api_key = std::env::var("ANTHROPIC_API_KEY")?;
 
-    let state = AppState::new(pool, line, whatsapp, claude_api_key);
+    let state = AppState::new(pool, line, whatsapp, telegram, claude_api_key);
 
     tokio::spawn(api::inbox_worker::run(state.clone()));
 

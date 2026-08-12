@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum Channel {
     Line,
     WhatsApp,
+    Telegram,
 }
 
 impl Channel {
@@ -17,6 +18,7 @@ impl Channel {
         match self {
             Self::Line => "line",
             Self::WhatsApp => "whats_app",
+            Self::Telegram => "telegram",
         }
     }
 }
@@ -26,6 +28,7 @@ impl std::fmt::Display for Channel {
         match self {
             Self::Line => write!(f, "LINE"),
             Self::WhatsApp => write!(f, "WhatsApp"),
+            Self::Telegram => write!(f, "Telegram"),
         }
     }
 }

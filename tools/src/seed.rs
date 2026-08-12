@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db_url = env::var("DATABASE_URL")?;
     let pool = sqlx::PgPool::connect(&db_url).await?;
-    sqlx::migrate!("../../store/migrations").run(&pool).await?;
+    sqlx::migrate!("../store/migrations").run(&pool).await?;
 
     // D08-7: hash password with bcrypt (cost 12 — matches prod security posture)
     let hash = bcrypt::hash(password, 12)?;

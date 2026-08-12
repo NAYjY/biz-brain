@@ -37,10 +37,14 @@ async fn process_batch(state: &AppState) -> Result<(), sqlx::Error> {
 async fn process_row(state: &AppState, row: &store::webhook_inbox::InboxRow) -> Result<(), Box<dyn std::error::Error>> {
     let sender: ChannelIdentity = serde_json::from_value(row.raw_payload["sender"].clone())?;
     let text = row.raw_payload["text"].as_str().unwrap_or_default();
-    let channel = if row.channel == "line" { Channel::Line } else { Channel::WhatsApp };
-
+    let channel = match row.channel.as_str() {
+        "line" => Channel::Line,
+        "whats_app" => Channel::WhatsApp,
+        "telegram" => Channel::Telegram,
+        _ => return Ok(()),
+    };
     match channel {
-        Channel::Line => process_worker_message(state, &sender, text).await,
+        Channel::Line | Channel::Telegram =>  process_worker_message(state, &sender, text).await,
         Channel::WhatsApp => process_supplier_message(state, &sender, text).await,
     }
 }

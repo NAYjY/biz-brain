@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent::{ClaudeClassifier, SupplierAgent, WorkerAgent};
-use messaging::{LineAdapter, WhatsAppAdapter};
+use messaging::{LineAdapter, WhatsAppAdapter, TelegramAdapter};
 use sqlx::PgPool;
 use store::{
     ActorDirectory, EventSourcing, OrderEventRepository, ProjectionTables, ProjectionWorker,
@@ -31,6 +31,7 @@ pub struct AppState {
     pub actors: Arc<ActorDirectory>,
     pub line: Arc<LineAdapter>,
     pub whatsapp: Arc<WhatsAppAdapter>,
+    pub telegram: Arc<TelegramAdapter>,
     pub worker_agent: Arc<WorkerAgent>,
     pub supplier_agent: Arc<SupplierAgent>,
     pub threads: Arc<Mutex<agent::ThreadContextStore>>,
@@ -50,6 +51,7 @@ impl AppState {
         pool: PgPool,
         line: LineAdapter,
         whatsapp: WhatsAppAdapter,
+        telegram: TelegramAdapter,
         claude_api_key: impl Into<String>,
     ) -> Self {
         let claude_api_key = claude_api_key.into();
@@ -63,6 +65,7 @@ impl AppState {
             actors: Arc::new(ActorDirectory::new(pool.clone())),
             line: Arc::new(line),
             whatsapp: Arc::new(whatsapp),
+            telegram: Arc::new(telegram),
             worker_agent: Arc::new(WorkerAgent::new(ClaudeClassifier::new(claude_api_key.clone()))),
             supplier_agent: Arc::new(SupplierAgent::new(ClaudeClassifier::new(claude_api_key))),
             threads: Arc::new(Mutex::new(agent::ThreadContextStore::new())),

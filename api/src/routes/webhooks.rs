@@ -66,3 +66,24 @@ pub async fn whatsapp_webhook(State(state): State<AppState>, headers: HeaderMap,
         Err(_) => StatusCode::BAD_REQUEST,
     }
 }
+
+pub async fn telegram_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let h = to_messaging_headers(&headers);
+    match messaging::inbound::receive(
+        state.telegram.as_ref(),
+        Channel::Telegram,
+        &state.inbox,
+        &h,
+        &body,
+    )
+    .await
+    {
+        Ok(_) => StatusCode::OK,
+        Err(messaging::ChannelError::VerificationFailed) => StatusCode::UNAUTHORIZED,
+        Err(_) => StatusCode::BAD_REQUEST,
+    }
+}

@@ -48,7 +48,8 @@ pub fn build_router() -> Router<AppState> {
         .route(
             "/webhooks/whatsapp",
             get(routes::webhooks::whatsapp_verify).post(routes::webhooks::whatsapp_webhook),
-        );
+        )
+        .route("/webhooks/telegram", post(routes::webhooks::telegram_webhook));
 
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::exact(

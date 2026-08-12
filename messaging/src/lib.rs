@@ -7,7 +7,9 @@ pub mod channel_trait;
 pub mod inbound;
 pub mod line;
 pub mod whatsapp;
+pub mod telegram;
 
 pub use channel_trait::{http_like::Headers, ChannelAdapter, ChannelError, InboundMessage};
 pub use line::LineAdapter;
 pub use whatsapp::WhatsAppAdapter;
+pub use telegram::TelegramAdapter;
