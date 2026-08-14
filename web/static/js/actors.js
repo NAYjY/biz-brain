@@ -1,30 +1,77 @@
 /**
  * D08-5: Actors page — Confirm / Reject pending channel identity bindings.
  *
- * No SSE wiring needed — this page has no live-update signal (no SseSignal
- * variant for actor_directory changes). Owner manually refreshes or
- * actions disappear from the table after confirm/reject.
+ * Confirm: Owner picks which Worker this sender maps to from a dropdown.
+ * Reject: removes the pending row; next message re-creates it.
  */
 
 function initActorsPage(branchId) {
   const api = (path, opts) =>
     BB.apiFetch(`/api/v1/branches/${branchId}${path}`, opts);
 
-  // Expose to inline onclick handlers on SSR-rendered rows.
-  window.actorConfirm = async (bindingId) => {
-    const ok = await BB.confirm(
-      'Confirm this binding? Messages from this sender will be trusted from now on.'
-    );
-    if (!ok) return;
+  // ── Confirm ───────────────────────────────────────────────────────── //
 
+  window.actorConfirm = async (bindingId) => {
+    // Load workers for this branch so Owner can pick which one
+    let workers = [];
     try {
-      await api(`/actors/${bindingId}/confirm`, { method: 'POST' });
-      removeRow(bindingId);
-      BB.showToast('Binding confirmed — sender is now trusted.', 'success');
+      workers = await api('/workers');
     } catch (e) {
-      BB.showToast(`Confirm failed: ${e.message}`, 'error');
+      BB.showToast(`Could not load workers: ${e.message}`, 'error');
+      return;
     }
+
+    if (workers.length === 0) {
+      BB.showToast('Create a worker first before confirming a binding.', 'error');
+      return;
+    }
+
+    const options = workers
+      .map(w => `<option value="${w.id}">${BB.escapeHtml(w.name)}</option>`)
+      .join('');
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `
+      <div class="confirm-dialog" role="dialog" aria-modal="true">
+        <p style="font-weight:600;">Link sender to which worker?</p>
+        <div class="form-group" style="margin-top:.5rem;">
+          <label class="form-label">Worker</label>
+          <select class="form-select" id="confirm-worker-select">
+            ${options}
+          </select>
+        </div>
+        <div class="confirm-dialog__actions" style="margin-top:1rem;">
+          <button class="btn btn--ghost"   data-action="cancel">Cancel</button>
+          <button class="btn btn--primary" data-action="confirm">Confirm</button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(backdrop);
+
+    backdrop.addEventListener('click', async (e) => {
+      const action = e.target.closest('[data-action]')?.dataset.action;
+      if (!action) return;
+      backdrop.remove();
+      if (action !== 'confirm') return;
+
+      const workerId = document.getElementById('confirm-worker-select')?.value;
+      if (!workerId) return;
+
+      try {
+        await api(`/actors/${bindingId}/confirm`, {
+          method: 'POST',
+          body: JSON.stringify({ worker_id: workerId }),
+        });
+        removeRow(bindingId);
+        BB.showToast('Binding confirmed — sender is now trusted.', 'success');
+      } catch (e) {
+        BB.showToast(`Confirm failed: ${e.message}`, 'error');
+      }
+    });
   };
+
+  // ── Reject ────────────────────────────────────────────────────────── //
 
   window.actorReject = async (bindingId) => {
     const ok = await BB.confirm(
@@ -41,6 +88,8 @@ function initActorsPage(branchId) {
     }
   };
 
+  // ── Helpers ───────────────────────────────────────────────────────── //
+
   function removeRow(bindingId) {
     const row = document.querySelector(`tr[data-binding-id="${bindingId}"]`);
     if (!row) return;
@@ -48,7 +97,6 @@ function initActorsPage(branchId) {
     const tbody = document.getElementById('actors-tbody');
     row.remove();
 
-    // If table is now empty, show the empty state row.
     if (tbody && tbody.querySelectorAll('tr').length === 0) {
       tbody.innerHTML =
         '<tr><td colspan="5" class="data-table__empty">No pending bindings.</td></tr>';

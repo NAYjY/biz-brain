@@ -12,6 +12,9 @@ pub struct OrderCurrentState {
     pub customer_id: Uuid,
     pub description: String,
     pub state: String,
+    pub worker_id: Option<Uuid>,
+    pub last_worker_message: Option<String>,
+    pub last_worker_message_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, FromRow)]
@@ -43,7 +46,9 @@ impl ProjectionTables {
             r#"
             INSERT INTO order_current_state (order_id, branch_id, customer_id, description, state)
             VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (order_id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
+            ON CONFLICT (order_id) DO UPDATE
+                SET state = EXCLUDED.state,
+                    updated_at = NOW()
             "#,
         )
         .bind(id.into_inner())
@@ -51,6 +56,25 @@ impl ProjectionTables {
         .bind(customer_id)
         .bind(description)
         .bind(state.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Save the raw text of the last Worker message so Owner can see and reply.
+    pub async fn update_worker_message(
+        &self,
+        order_id: OrderId,
+        message: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE order_current_state \
+             SET last_worker_message = $2, \
+                 last_worker_message_at = NOW() \
+             WHERE order_id = $1",
+        )
+        .bind(order_id.into_inner())
+        .bind(message)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -67,7 +91,9 @@ impl ProjectionTables {
             r#"
             INSERT INTO supply_request_current_state (supply_request_id, branch_id, description, state)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (supply_request_id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
+            ON CONFLICT (supply_request_id) DO UPDATE
+                SET state = EXCLUDED.state,
+                    updated_at = NOW()
             "#,
         )
         .bind(id.into_inner())
@@ -80,15 +106,27 @@ impl ProjectionTables {
     }
 
     pub async fn orders_by_branch(&self, branch_id: Uuid) -> Result<Vec<OrderCurrentState>, sqlx::Error> {
-        sqlx::query_as("SELECT order_id AS id, branch_id, customer_id, description, state FROM order_current_state WHERE branch_id = $1 ORDER BY updated_at DESC")            .bind(branch_id)
-            .fetch_all(&self.pool)
-            .await
+        sqlx::query_as(
+            "SELECT order_id AS id, branch_id, customer_id, description, state, \
+                    worker_id, last_worker_message, last_worker_message_at \
+             FROM order_current_state \
+             WHERE branch_id = $1 \
+             ORDER BY updated_at DESC",
+        )
+        .bind(branch_id)
+        .fetch_all(&self.pool)
+        .await
     }
 
     pub async fn supply_requests_by_branch(&self, branch_id: Uuid) -> Result<Vec<SupplyRequestCurrentState>, sqlx::Error> {
-        sqlx::query_as("SELECT supply_request_id AS id, branch_id, description, state FROM supply_request_current_state WHERE branch_id = $1 ORDER BY updated_at DESC")
-            .bind(branch_id)
-            .fetch_all(&self.pool)
-            .await
+        sqlx::query_as(
+            "SELECT supply_request_id AS id, branch_id, description, state \
+             FROM supply_request_current_state \
+             WHERE branch_id = $1 \
+             ORDER BY updated_at DESC",
+        )
+        .bind(branch_id)
+        .fetch_all(&self.pool)
+        .await
     }
 }

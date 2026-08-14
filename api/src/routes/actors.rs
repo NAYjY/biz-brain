@@ -3,7 +3,7 @@
 //! rejects each one before messages from that sender are trusted.
 //!
 //! GET  /api/v1/branches/:branch_id/actors/pending      — list unconfirmed
-//! POST /api/v1/branches/:branch_id/actors/:id/confirm  — trust this binding
+//! POST /api/v1/branches/:branch_id/actors/:id/confirm  — trust + link to worker/supplier
 //! POST /api/v1/branches/:branch_id/actors/:id/reject   — remove this binding
 
 use axum::{
@@ -11,6 +11,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use serde::Deserialize;
 use uuid::Uuid;
 
 use domain::BranchId;
@@ -22,8 +23,8 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-/// List all unconfirmed actor bindings for this Branch.
-/// Owner reviews these and calls /confirm or /reject on each.
+/// List all unconfirmed actor bindings (not branch-scoped — pending rows
+/// have no branch until the Owner confirms them).
 pub async fn list_pending_bindings(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     State(state): State<AppState>,
@@ -36,11 +37,18 @@ pub async fn list_pending_bindings(
     Ok(Json(rows))
 }
 
-/// Owner confirms a binding — sender becomes trusted from this point on.
+#[derive(Debug, Deserialize)]
+pub struct ConfirmBindingRequest {
+    /// The WorkerId or SupplierId to link this channel sender to.
+    pub worker_id: Uuid,
+}
+
+/// Owner confirms a binding, supplying which Worker this sender maps to.
 pub async fn confirm_binding(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path(params): Path<std::collections::HashMap<String, String>>,
     State(state): State<AppState>,
+    Json(req): Json<ConfirmBindingRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let actor_id = params
         .get("actor_id")
@@ -50,7 +58,7 @@ pub async fn confirm_binding(
 
     let updated = state
         .actors
-        .confirm_binding(actor_id, BranchId::new(branch_id))
+        .confirm_binding(actor_id, BranchId::new(branch_id), req.worker_id)
         .await
         .map_err(internal)?;
 
@@ -62,8 +70,6 @@ pub async fn confirm_binding(
 }
 
 /// Owner rejects / removes a binding.
-/// Also the path for rebinding: reject the old entry, then the next inbound
-/// message from that sender creates a new pending row.
 pub async fn reject_binding(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path(params): Path<std::collections::HashMap<String, String>>,

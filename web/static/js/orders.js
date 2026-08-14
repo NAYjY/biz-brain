@@ -1,8 +1,7 @@
 /**
  * D04: Orders page — client-side logic.
- * D08-2: load customer id->name map; use name in row render.
- * D08-3: call attachRowActions on SSR rows at DOMContentLoaded, not only after re-fetch.
- * Confirm-before-submit for Assign-Worker and Close (D04 resolution).
+ * Shows last Worker message under each order row.
+ * Owner can reply to Worker directly from dashboard on any order state.
  */
 
 function initOrdersPage(branchId) {
@@ -11,14 +10,11 @@ function initOrdersPage(branchId) {
   // ── State ────────────────────────────────────────────────────────── //
 
   let pendingAssignOrderId = null;
-  // D08-2: id -> name map populated by loadCustomers()
   let customerMap = {};
 
   // ── On load ──────────────────────────────────────────────────────── //
 
-  // D08-3: attach actions to SSR-rendered rows immediately
   attachRowActions();
-
   loadCustomers();
   loadWorkers();
 
@@ -46,13 +42,32 @@ function initOrdersPage(branchId) {
     attachRowActions();
   }
 
-  // D08-2: use customerMap for display name
   function orderRowHtml(o) {
     const pill = BB.statePill(o.state);
     const customerName = BB.escapeHtml(customerMap[o.customer_id] || BB.shortId(o.customer_id));
     const worker = o.worker_id
       ? `<span class="font-mono text-xs">${BB.shortId(o.worker_id)}</span>`
       : '—';
+
+    // Worker message bubble — shown whenever there is a last message
+    const messageRow = o.last_worker_message ? `
+      <tr class="worker-message-row">
+        <td colspan="5">
+          <div class="worker-message-bubble">
+            <span class="worker-message-label">Worker said:</span>
+            <span class="worker-message-text">${BB.escapeHtml(o.last_worker_message)}</span>
+            <div class="worker-reply-box">
+              <input class="form-input worker-reply-input"
+                     type="text"
+                     placeholder="Reply to worker…"
+                     id="reply-${o.id}">
+              <button class="btn btn--primary btn--sm"
+                      onclick="sendWorkerReply('${o.id}')">Send</button>
+            </div>
+          </div>
+        </td>
+      </tr>` : '';
+
     return `
       <tr data-order-id="${o.id}">
         <td>${pill}</td>
@@ -60,10 +75,9 @@ function initOrdersPage(branchId) {
         <td class="text-muted text-sm">${customerName}</td>
         <td class="text-muted text-xs">${worker}</td>
         <td><div class="order-actions" data-order-id="${o.id}" style="display:flex;gap:.5rem;"></div></td>
-      </tr>`;
+      </tr>${messageRow}`;
   }
 
-  // D08-3: shared fn called both at init and after re-fetch
   function attachRowActions() {
     document.querySelectorAll('.order-actions').forEach(renderActions);
   }
@@ -96,6 +110,25 @@ function initOrdersPage(branchId) {
     return b;
   }
 
+  // ── Send reply to Worker ──────────────────────────────────────────── //
+
+  window.sendWorkerReply = async (orderId) => {
+    const input = document.getElementById(`reply-${orderId}`);
+    const text = input?.value.trim();
+    if (!text) { BB.showToast('Type a message first', 'error'); return; }
+
+    try {
+      await api(`/orders/${orderId}/message-worker`, {
+        method: 'POST',
+        body: JSON.stringify({ text }),
+      });
+      input.value = '';
+      BB.showToast('Message sent to worker ✓', 'success');
+    } catch (e) {
+      BB.showToast(`Send failed: ${e.message}`, 'error');
+    }
+  };
+
   // ── Create Order ─────────────────────────────────────────────────── //
 
   document.getElementById('new-customer-btn').addEventListener('click', () => {
@@ -103,9 +136,9 @@ function initOrdersPage(branchId) {
   });
 
   document.getElementById('create-order-btn').addEventListener('click', async () => {
-    const descEl = document.getElementById('order-description');
+    const descEl     = document.getElementById('order-description');
     const customerEl = document.getElementById('order-customer');
-    const newNameEl = document.getElementById('new-customer-name');
+    const newNameEl  = document.getElementById('new-customer-name');
 
     const description = descEl.value.trim();
     if (!description) { BB.showToast('Description required', 'error'); return; }
@@ -115,7 +148,10 @@ function initOrdersPage(branchId) {
     const newName = newNameEl.value.trim();
     if (newName) {
       try {
-        const c = await api('/customers', { method: 'POST', body: JSON.stringify({ name: newName }) });
+        const c = await api('/customers', {
+          method: 'POST',
+          body: JSON.stringify({ name: newName }),
+        });
         customerId = c.id;
         await loadCustomers();
       } catch (e) {
@@ -127,9 +163,12 @@ function initOrdersPage(branchId) {
     if (!customerId) { BB.showToast('Select or create a customer', 'error'); return; }
 
     try {
-      await api('/orders', { method: 'POST', body: JSON.stringify({ customer_id: customerId, description }) });
+      await api('/orders', {
+        method: 'POST',
+        body: JSON.stringify({ customer_id: customerId, description }),
+      });
       BB.closeModal('create-order-modal');
-      descEl.value = '';
+      descEl.value   = '';
       newNameEl.value = '';
       document.getElementById('new-customer-row').style.display = 'none';
       await refreshOrderList();
@@ -150,7 +189,7 @@ function initOrdersPage(branchId) {
     if (!workerId) { BB.showToast('Select a worker', 'error'); return; }
 
     const ok = await BB.confirm(
-      'Assign this worker? A LINE message will be sent to them immediately.'
+      'Assign this worker? A message will be sent to them immediately.'
     );
     if (!ok) return;
 
@@ -182,7 +221,6 @@ function initOrdersPage(branchId) {
 
   // ── Data loaders ─────────────────────────────────────────────────── //
 
-  // D08-2: build id->name map on load
   async function loadCustomers() {
     try {
       const customers = await api('/customers');
@@ -191,7 +229,9 @@ function initOrdersPage(branchId) {
 
       const sel = document.getElementById('order-customer');
       sel.innerHTML = '<option value="">Select customer…</option>' +
-        customers.map(c => `<option value="${c.id}">${BB.escapeHtml(c.name)}</option>`).join('');
+        customers.map(c =>
+          `<option value="${c.id}">${BB.escapeHtml(c.name)}</option>`
+        ).join('');
     } catch { /* non-fatal */ }
   }
 
@@ -200,7 +240,9 @@ function initOrdersPage(branchId) {
       const workers = await api('/workers');
       const sel = document.getElementById('assign-worker-select');
       sel.innerHTML = '<option value="">Select worker…</option>' +
-        workers.map(w => `<option value="${w.id}">${BB.escapeHtml(w.name)}</option>`).join('');
+        workers.map(w =>
+          `<option value="${w.id}">${BB.escapeHtml(w.name)}</option>`
+        ).join('');
     } catch { /* non-fatal */ }
   }
 }
