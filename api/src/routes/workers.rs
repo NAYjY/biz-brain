@@ -112,7 +112,7 @@ pub async fn delete_worker(
 
     // Check no active orders
     let active: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM order_current_state \
+        "SELECT COUNT(*)::bigint FROM order_current_state \
          WHERE worker_id = $1 AND state NOT IN ('done', 'cancelled', 'unavailable')",
     )
     .bind(worker_id)

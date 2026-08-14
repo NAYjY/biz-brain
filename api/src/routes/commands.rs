@@ -36,7 +36,7 @@ pub async fn assign_worker(
 
     // Verify the worker has a confirmed channel binding before assigning
     // (fan_out will fail silently otherwise — better to fail the command with a clear message)
-    let binding_check: Option<(i64,)> = sqlx::query_as(
+    let binding_check: Option<(i32,)> = sqlx::query_as(
         "SELECT 1 FROM actor_directory \
         WHERE actor_id = $1 AND actor_type = 'worker' AND owner_confirmed = TRUE",
     )

@@ -55,7 +55,7 @@ pub async fn confirm_binding(
         .ok_or((StatusCode::BAD_REQUEST, "missing actor_id".to_string()))?
         .parse::<Uuid>()
         .map_err(|_| (StatusCode::BAD_REQUEST, "actor_id not a valid UUID".to_string()))?;
-    let worker_check: Option<(i64,)> = sqlx::query_as(
+    let worker_check: Option<(i32,)> = sqlx::query_as(
         "SELECT 1 FROM workers WHERE id = $1 AND branch_id = $2",
     )
     .bind(req.worker_id)

@@ -52,11 +52,19 @@ function initActorsPage(branchId) {
     backdrop.addEventListener('click', async (e) => {
       const action = e.target.closest('[data-action]')?.dataset.action;
       if (!action) return;
-      backdrop.remove();
-      if (action !== 'confirm') return;
+      if (action !== 'confirm') {
+        backdrop.remove();
+        return;
+      }
 
+      // Read value BEFORE removing the backdrop from the DOM
       const workerId = document.getElementById('confirm-worker-select')?.value;
-      if (!workerId) return;
+      backdrop.remove();
+
+      if (!workerId) {
+        BB.showToast('No worker selected', 'error');
+        return;
+      }
 
       try {
         await api(`/actors/${bindingId}/confirm`, {
