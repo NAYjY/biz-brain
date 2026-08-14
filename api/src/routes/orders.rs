@@ -78,6 +78,7 @@ pub async fn create_order(
             req.customer_id,
             &req.description,
             domain::OrderState::Unassigned,
+            None,
         )
         .await
         .map_err(internal)?;

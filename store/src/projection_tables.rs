@@ -34,20 +34,23 @@ impl ProjectionTables {
         Self { pool }
     }
 
-    pub async fn upsert_order_state(
+        pub async fn upsert_order_state(
         &self,
         id: OrderId,
         branch_id: Uuid,
         customer_id: Uuid,
         description: &str,
         state: OrderState,
+        worker_id: Option<uuid::Uuid>,   // <-- NEW param
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
-            INSERT INTO order_current_state (order_id, branch_id, customer_id, description, state)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO order_current_state
+                (order_id, branch_id, customer_id, description, state, worker_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (order_id) DO UPDATE
-                SET state = EXCLUDED.state,
+                SET state      = EXCLUDED.state,
+                    worker_id  = COALESCE(EXCLUDED.worker_id, order_current_state.worker_id),
                     updated_at = NOW()
             "#,
         )
@@ -56,6 +59,7 @@ impl ProjectionTables {
         .bind(customer_id)
         .bind(description)
         .bind(state.to_string())
+        .bind(worker_id)
         .execute(&self.pool)
         .await?;
         Ok(())

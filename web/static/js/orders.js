@@ -128,6 +128,7 @@ function initOrdersPage(branchId) {
       BB.showToast(`Send failed: ${e.message}`, 'error');
     }
   };
+  BB.sendWorkerReply = window.sendWorkerReply;
 
   // ── Create Order ─────────────────────────────────────────────────── //
 

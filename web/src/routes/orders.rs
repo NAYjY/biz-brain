@@ -147,20 +147,52 @@ pub async fn render_orders(
 
 fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     let state_lower = o.state.to_lowercase();
-    let short_id = &o.id.to_string()[..8];
+ 
+    let worker_cell = match o.worker_id {
+        Some(id) => format!(r#"<span class="font-mono text-xs">{}</span>"#, &id.to_string()[..8]),
+        None => "—".to_string(),
+    };
+ 
+    // Worker message bubble — same markup as orders.js orderRowHtml so CSS matches
+    let message_row = match &o.last_worker_message {
+        Some(msg) => format!(
+            r#"<tr class="worker-message-row">
+  <td colspan="5">
+    <div class="worker-message-bubble">
+      <span class="worker-message-label">Worker said:</span>
+      <span class="worker-message-text">{msg}</span>
+      <div class="worker-reply-box">
+        <input class="form-input worker-reply-input"
+               type="text"
+               placeholder="Reply to worker…"
+               id="reply-{id}">
+        <button class="btn btn--primary btn--sm"
+                onclick="BB.sendWorkerReply('{id}')">Send</button>
+      </div>
+    </div>
+  </td>
+</tr>"#,
+            msg = html_escape(msg),
+            id = o.id,
+        ),
+        None => String::new(),
+    };
+ 
     format!(
         r#"<tr data-order-id="{id}">
   <td><span class="state-pill state-pill--{state_lower}">{state}</span></td>
   <td>{desc}</td>
   <td class="text-muted font-mono text-xs">{customer}</td>
-  <td class="text-muted text-xs" id="worker-{id}">—</td>
+  <td class="text-muted text-xs" id="worker-{id}">{worker}</td>
   <td><div style="display:flex;gap:.5rem;" class="order-actions" data-order-id="{id}"></div></td>
-</tr>"#,
+</tr>{message_row}"#,
         id = o.id,
         state_lower = state_lower,
         state = o.state.replace('_', " "),
         desc = html_escape(&o.description),
         customer = &o.customer_id.to_string()[..8],
+        worker = worker_cell,
+        message_row = message_row,
     )
 }
 

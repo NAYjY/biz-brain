@@ -31,18 +31,37 @@ impl ProjectionWorker {
     /// projection, and return the T07 invalidation signal to publish.
     pub async fn project_order(&self, order_id: OrderId) -> Result<SseSignal, ReadError> {
         let events = self.order_events.load_stream(order_id).await?;
-        let state = events.iter().rev().find_map(Self::order_state_of).unwrap_or(OrderState::Unassigned);
-
+    
+        let state = events.iter().rev().find_map(Self::order_state_of)
+            .unwrap_or(OrderState::Unassigned);
+    
+        // Extract worker_id from most recent worker-bearing event
+        let worker_id = events.iter().rev().find_map(|e| match e {
+            DomainEvent::WorkerAssigned { worker_id, .. }
+            | DomainEvent::WorkerAccepted { worker_id, .. }
+            | DomainEvent::WorkerUnavailable { worker_id, .. }
+            | DomainEvent::WorkerCancelled { worker_id, .. }
+            | DomainEvent::ClarificationRequested { worker_id, .. }
+            | DomainEvent::WorkerReadyForPickup { worker_id, .. } => Some(worker_id.into_inner()),
+            _ => None,
+        });
+    
+        // Clear worker_id if order returned to Unassigned
+        let worker_id = match state {
+            OrderState::Unassigned => None,
+            _ => worker_id,
+        };
+    
         let meta: (uuid::Uuid, uuid::Uuid, String) =
             sqlx::query_as("SELECT branch_id, customer_id, description FROM orders WHERE id = $1")
                 .bind(order_id.into_inner())
                 .fetch_one(&self.pool)
                 .await?;
-
+    
         self.projections
-            .upsert_order_state(order_id, meta.0, meta.1, &meta.2, state)
+            .upsert_order_state(order_id, meta.0, meta.1, &meta.2, state, worker_id)
             .await?;
-
+    
         Ok(SseSignal::OrderChanged { order_id, branch_id: domain::BranchId::new(meta.0) })
     }
 

@@ -66,7 +66,6 @@ async fn process_worker_message(
                  Registering as pending — confirm in dashboard.",
                 sender.external_id
             );
-            // Register so Owner sees it in Pending Bindings page.
             let _ = state.actors.register_pending(
                 sender,
                 store::actor_directory::ActorType::Worker,
@@ -74,24 +73,35 @@ async fn process_worker_message(
             Ok(())
         }
         Some(worker_id) => {
+            // ── Save raw message FIRST ────────────────────────────────────
+            // Do this before interpret() so Owner always sees what Worker
+            // said, even if Agent returns Unprocessed or errors out.
+            // Need to find the order_id to attach it to — use active orders.
+            let active_order_ids = state.actors.active_orders_for_worker(worker_id).await?;
+            if let Some(&order_id) = active_order_ids.first() {
+                let _ = state.projections.update_worker_message(order_id, text).await;
+                // Fire SSE so dashboard refreshes and Owner sees the message
+                let signal = state.projection_worker.project_order(order_id).await?;
+                state.publish_sse(signal).await;
+            }
+            // ─────────────────────────────────────────────────────────────
+ 
             let outcome = {
                 let mut threads = state.threads.lock().await;
-                for order_id in state.actors.active_orders_for_worker(worker_id).await? {
+                for order_id in active_order_ids {
                     threads.add_active_order(sender.clone(), order_id);
                 }
                 state.worker_agent.interpret(text, worker_id, sender, &threads).await?
             };
-
+ 
             match outcome {
                 InterpretationOutcome::Event(event) => {
-                    // Reply to Worker confirming their action
                     let reply = agent_reply_for_event(&event);
                     let _ = send_to_sender(state, sender, &reply).await;
-
-                    append_order_event(state, event, text).await
+                    // Pass empty str — message already saved above
+                    append_order_event(state, event, "").await
                 }
                 InterpretationOutcome::NeedsOrderDisambiguation { question, .. } => {
-                    // Ask Worker which order they mean
                     let _ = send_to_sender(state, sender, &question).await;
                     Ok(())
                 }
@@ -100,7 +110,7 @@ async fn process_worker_message(
                     let _ = send_to_sender(
                         state,
                         sender,
-                        "Sorry, I didn't understand that. Please try again or wait for the Owner to respond.",
+                        "Sorry, I didn't understand that. The Owner can see your message and will respond.",
                     ).await;
                     Ok(())
                 }
@@ -199,21 +209,22 @@ async fn append_order_event(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let order_id = event.order_id().expect("Worker-agent events are always Order-aggregate");
     let seq = state.order_events.current_sequence(order_id).await?;
-
+ 
     let branch_id: (uuid::Uuid,) =
         sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
             .bind(order_id.into_inner())
             .fetch_one(&state.pool)
             .await?;
-
+ 
     state.event_sourcing.append(BranchId::new(branch_id.0), seq + 1, &event).await?;
-
-    // Save raw message so Owner can read it and reply from dashboard
-    let _ = state.projections.update_worker_message(order_id, raw_message).await;
-
-    // Fan out notifications AFTER event is stored
+ 
+    // Only save message if non-empty (empty = already saved before interpret)
+    if !raw_message.is_empty() {
+        let _ = state.projections.update_worker_message(order_id, raw_message).await;
+    }
+ 
     event_handler::fan_out(state, &event).await;
-
+ 
     let signal = state.projection_worker.project_order(order_id).await?;
     state.publish_sse(signal).await;
     Ok(())
