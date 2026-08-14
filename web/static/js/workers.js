@@ -21,7 +21,7 @@ function initWorkersPage(branchId) {
       });
       BB.closeModal('create-worker-modal');
       nameEl.value = '';
-      appendWorkerRow(worker);
+      await refreshWorkerList();
       BB.showToast(`Worker "${worker.name}" added — tell them to message your LINE bot.`, 'success');
     } catch (e) {
       BB.showToast(`Failed: ${e.message}`, 'error');
@@ -52,6 +52,35 @@ function initWorkersPage(branchId) {
 
   // ── Helpers ───────────────────────────────────────────────────────── //
 
+  async function refreshWorkerList() {
+      try {
+          const workers = await api('/workers');
+          const tbody = document.getElementById('workers-tbody');
+          if (workers.length === 0) {
+              tbody.innerHTML = '<tr><td colspan="4" class="data-table__empty">No workers yet.</td></tr>';
+              return;
+          }
+          tbody.innerHTML = workers.map(workerRowHtml).join('');
+      } catch (e) {
+          BB.showToast(`Refresh failed: ${e.message}`, 'error');
+      }
+  }
+
+  function workerRowHtml(w) {
+      const channelLabel = { line: 'LINE', whats_app: 'WhatsApp', telegram: 'Telegram' };
+      const bindingCell = w.bound
+          ? `<span class="channel-badge channel-badge--${(w.channel || '').replace('_','-')}">${channelLabel[w.channel] || w.channel}</span>`
+          : `<span class="text-muted text-xs">Not bound</span>`;
+      const idCell = w.bound && w.external_id
+          ? `<span class="font-mono text-xs">${BB.escapeHtml(w.external_id)}</span>`
+          : `<span class="text-muted text-xs">—</span>`;
+      return `<tr data-worker-id="${w.id}">
+    <td>${BB.escapeHtml(w.name)}</td>
+    <td>${bindingCell}</td>
+    <td>${idCell}</td>
+    <td><button class="btn btn--ghost btn--sm" onclick="workerDelete('${w.id}')">Remove</button></td>
+  </tr>`;
+  }
   function appendWorkerRow(worker) {
     const tbody = document.getElementById('workers-tbody');
 

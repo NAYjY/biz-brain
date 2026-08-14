@@ -33,6 +33,26 @@ pub async fn assign_worker(
     State(state): State<AppState>,
     Json(req): Json<AssignWorkerRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+
+    // Verify the worker has a confirmed channel binding before assigning
+    // (fan_out will fail silently otherwise — better to fail the command with a clear message)
+    let binding_check: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM actor_directory \
+        WHERE actor_id = $1 AND actor_type = 'worker' AND owner_confirmed = TRUE",
+    )
+    .bind(req.worker_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+
+    if binding_check.is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            "This worker has no confirmed LINE/WhatsApp binding yet. \
+            Go to Workers & Suppliers to confirm their binding first.".to_string(),
+        ));
+    }
+
     let order_id = path_uuid(&params, "order_id")?;
     let event = DomainEvent::WorkerAssigned {
         worker_id: WorkerId::new(req.worker_id),
