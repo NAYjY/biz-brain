@@ -1,21 +1,26 @@
-//! Agent crate (T03): turns an inbound Worker/Supplier message into zero or
-//! more `DomainEvent`s. Never called from the webhook handler synchronously
-//! (T04) — always invoked from the async worker draining `webhook_inbox`.
+//! Agent crate (T03 / P01 / P13): turns an inbound Worker/Supplier message
+//! into zero or more `DomainEvent`s.
+//!
+//! P01: prompt harness with Thai/English few-shot examples, OrderState
+//! injection, structured output validation, Owner alert on unexpected variant.
+//! P13: conversation history window, `{ variant, order_id }` output.
+//! P06: SupplierConfirmed in both prefilter and classifier.
 
 #![warn(clippy::all)]
 
-mod classify;
-mod outcome;
-mod prefilter;
-mod thread_context;
+pub mod classify;
+pub mod outcome;
+pub mod prefilter;
+pub mod thread_context;
 
-pub use classify::ClaudeClassifier;
+pub use classify::{ActiveOrderContext, ClaudeClassifier, HistoryMessage};
 pub use outcome::{InterpretationError, InterpretationOutcome, OwnerAlert};
 pub use thread_context::ThreadContextStore;
 
 use domain::{ChannelIdentity, DomainEvent, DomainEventVariant, OrderId, WorkerId};
 use prefilter::Prefilter;
 
+/// Agent for Worker messages (LINE / Telegram).
 pub struct WorkerAgent {
     prefilter: Prefilter,
     classifier: ClaudeClassifier,
@@ -26,48 +31,26 @@ impl WorkerAgent {
         Self { prefilter: Prefilter::worker_events(), classifier }
     }
 
-    /// Interpret a Worker's message. `sender` resolves to `worker_id` by the
-    /// caller (messaging crate owns that lookup, T04); `threads` supplies the
-    /// set of Orders currently active for this sender (T03: set-valued, not
-    /// single "current Order").
-    pub async fn interpret(
+    /// Attempt prefilter first; fall through to Claude classify on miss.
+    ///
+    /// Returns `Ok(Some((variant, order_id)))` on success,
+    /// `Ok(None)` when the message is unrecognized,
+    /// `Err` on API/parse/unexpected-variant failure (triggers Owner alert).
+    pub async fn classify(
         &self,
         message: &str,
-        worker_id: WorkerId,
-        sender: &ChannelIdentity,
-        threads: &ThreadContextStore,
-    ) -> Result<InterpretationOutcome, InterpretationError> {
-        let variant = match self.prefilter.classify(message) {
-            Some(v) => Some(v),
-            None => self.classifier.classify_worker_message(message).await?,
-        };
-
-        let Some(variant) = variant else {
-            return Ok(InterpretationOutcome::Unprocessed {
-                reason: "message did not match any known Worker action".into(),
-            });
-        };
-
-        let active = threads.active_orders(sender);
-        let order_id = match active {
-            [] => {
-                return Ok(InterpretationOutcome::Unprocessed {
-                    reason: "sender has no active Order to apply this action to".into(),
-                })
-            }
-            [only] => *only,
-            many => {
-                return Ok(InterpretationOutcome::NeedsOrderDisambiguation {
-                    candidates: many.to_vec(),
-                    question: "You have more than one active order — which one is this about?".into(),
-                })
-            }
-        };
-
-        Ok(InterpretationOutcome::Event(construct_worker_event(variant, worker_id, order_id)))
+        history: &[HistoryMessage],
+        active_orders: &[ActiveOrderContext],
+    ) -> Result<Option<(DomainEventVariant, Option<uuid::Uuid>)>, InterpretationError> {
+        // Cheap prefilter — no Claude call if a keyword matches.
+        if let Some(variant) = self.prefilter.classify(message) {
+            return Ok(Some((variant, None)));
+        }
+        self.classifier.classify_worker_message(message, history, active_orders).await
     }
 }
 
+/// Agent for Supplier messages (WhatsApp).
 pub struct SupplierAgent {
     prefilter: Prefilter,
     classifier: ClaudeClassifier,
@@ -78,38 +61,34 @@ impl SupplierAgent {
         Self { prefilter: Prefilter::supplier_events(), classifier }
     }
 
-    /// Interpret a Supplier message. Only `InvoiceReceived` originates here —
-    /// `InvoiceApproved`/`SupplierConfirmed` are Owner-dashboard commands (T05),
-    /// never Agent-interpreted.
-    pub async fn interpret(&self, message: &str) -> Result<InterpretationOutcome, InterpretationError> {
-        let variant = match self.prefilter.classify(message) {
-            Some(v) => Some(v),
-            None => self.classifier.classify_supplier_message(message).await?,
-        };
-
-        match variant {
-            Some(DomainEventVariant::InvoiceReceived) => {
-                // Caller (messaging crate) still needs to attach supplier_id/
-                // supply_request_id/invoice_id resolved from the webhook payload.
-                Ok(InterpretationOutcome::Unprocessed {
-                    reason: "InvoiceReceived recognized; awaiting invoice detail extraction by caller".into(),
-                })
-            }
-            _ => Ok(InterpretationOutcome::Unprocessed { reason: "message did not match any known Supplier action".into() }),
+    pub async fn classify(
+        &self,
+        message: &str,
+        history: &[HistoryMessage],
+        active_supply_requests: &[ActiveOrderContext],
+    ) -> Result<Option<(DomainEventVariant, Option<uuid::Uuid>)>, InterpretationError> {
+        if let Some(variant) = self.prefilter.classify(message) {
+            return Ok(Some((variant, None)));
         }
+        self.classifier.classify_supplier_message(message, history, active_supply_requests).await
     }
 }
 
-fn construct_worker_event(variant: DomainEventVariant, worker_id: WorkerId, order_id: OrderId) -> DomainEvent {
+/// Construct the concrete `DomainEvent` from a Worker-side variant.
+/// Panics in debug if a Supplier-only variant is passed (unreachable in prod).
+pub fn construct_worker_event(
+    variant: DomainEventVariant,
+    worker_id: WorkerId,
+    order_id: OrderId,
+) -> DomainEvent {
     match variant {
-        DomainEventVariant::WorkerAssigned => DomainEvent::WorkerAssigned { worker_id, order_id },
-        DomainEventVariant::WorkerAccepted => DomainEvent::WorkerAccepted { worker_id, order_id },
-        DomainEventVariant::WorkerUnavailable => DomainEvent::WorkerUnavailable { worker_id, order_id },
-        DomainEventVariant::WorkerCancelled => DomainEvent::WorkerCancelled { worker_id, order_id },
-        DomainEventVariant::ClarificationRequested => DomainEvent::ClarificationRequested { worker_id, order_id },
-        DomainEventVariant::WorkerReadyForPickup => DomainEvent::WorkerReadyForPickup { worker_id, order_id },
-        DomainEventVariant::OrderDone => DomainEvent::OrderDone { order_id },
-        // Supplier-only variants never reach here — WorkerAgent's prefilter/classify vocab excludes them.
+        DomainEventVariant::WorkerAssigned        => DomainEvent::WorkerAssigned { worker_id, order_id },
+        DomainEventVariant::WorkerAccepted        => DomainEvent::WorkerAccepted { worker_id, order_id },
+        DomainEventVariant::WorkerUnavailable     => DomainEvent::WorkerUnavailable { worker_id, order_id },
+        DomainEventVariant::WorkerCancelled       => DomainEvent::WorkerCancelled { worker_id, order_id },
+        DomainEventVariant::ClarificationRequested=> DomainEvent::ClarificationRequested { worker_id, order_id },
+        DomainEventVariant::WorkerReadyForPickup  => DomainEvent::WorkerReadyForPickup { worker_id, order_id },
+        DomainEventVariant::OrderDone             => DomainEvent::OrderDone { order_id },
         other => unreachable!("Supplier-only variant {other:?} routed into WorkerAgent"),
     }
 }

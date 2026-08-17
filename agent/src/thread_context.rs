@@ -1,6 +1,11 @@
-//! T03: "which Order is this message about" — session state per LINE/WhatsApp
-//! thread. Set-valued, not a single "current Order": a Worker can hold
-//! multiple concurrent `Assigned` Orders (freelance work is not single-order).
+//! T03 / P07: "which Order is this message about" — session state per sender.
+//! Set-valued: a Worker can hold multiple concurrent `Assigned` Orders.
+//!
+//! P07: `remove_active_order` is called by inbox_worker when a terminal event
+//! (OrderDone, WorkerUnavailable, WorkerCancelled, OwnerCancelled) fires.
+//! OrderReset does NOT remove from ThreadContextStore — a stale hit on an
+//! Unassigned order causes P13 classifier to return null order_id, which
+//! falls through to disambiguation correctly (P04 + P07 resolution).
 
 use std::collections::HashMap;
 
