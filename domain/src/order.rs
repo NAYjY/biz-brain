@@ -1,4 +1,7 @@
 //! Order aggregate — closed enum state, runtime-validated transitions (T01).
+//!
+//! P04/P15: added transitions for OwnerCancelled, OrderReset,
+//! ClarificationResolved events.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,14 +23,14 @@ pub enum OrderState {
 impl std::fmt::Display for OrderState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Self::Unassigned => "UNASSIGNED",
-            Self::Assigned => "ASSIGNED",
-            Self::Accepted => "ACCEPTED",
-            Self::PendingClarification => "PENDING_CLARIFICATION",
-            Self::Unavailable => "UNAVAILABLE",
-            Self::ReadyForPickup => "READY_FOR_PICKUP",
-            Self::Done => "DONE",
-            Self::Cancelled => "CANCELLED",
+            Self::Unassigned          => "UNASSIGNED",
+            Self::Assigned            => "ASSIGNED",
+            Self::Accepted            => "ACCEPTED",
+            Self::PendingClarification=> "PENDING_CLARIFICATION",
+            Self::Unavailable         => "UNAVAILABLE",
+            Self::ReadyForPickup      => "READY_FOR_PICKUP",
+            Self::Done                => "DONE",
+            Self::Cancelled           => "CANCELLED",
         };
         write!(f, "{s}")
     }
@@ -52,7 +55,12 @@ pub struct TransitionError {
 }
 
 impl Order {
-    pub fn new(id: OrderId, branch_id: BranchId, customer_id: CustomerId, description: impl Into<String>) -> Self {
+    pub fn new(
+        id: OrderId,
+        branch_id: BranchId,
+        customer_id: CustomerId,
+        description: impl Into<String>,
+    ) -> Self {
         Self {
             id,
             branch_id,
@@ -63,9 +71,7 @@ impl Order {
         }
     }
 
-    /// Validates and applies a transition. Legality lives here; the *meaning*
-    /// difference between e.g. Cancelled/Unavailable (both -> Unassigned)
-    /// lives in which DomainEvent drove the call, not in the resulting state.
+    /// Validates and applies a transition.  All legality lives here.
     pub fn transition(&mut self, to: OrderState) -> Result<(), TransitionError> {
         if !Self::is_valid(self.state, to) {
             return Err(TransitionError { from: self.state, to });
@@ -74,17 +80,22 @@ impl Order {
         Ok(())
     }
 
+    /// P04/P15: is_valid extended to cover OwnerCancelled (all non-Done →
+    /// Cancelled) and OrderReset (Unavailable|Cancelled → Unassigned).
     fn is_valid(from: OrderState, to: OrderState) -> bool {
         use OrderState::*;
         match from {
-            Unassigned => matches!(to, Assigned),
-            Assigned => matches!(to, Accepted | Unavailable | PendingClarification),
-            Accepted => matches!(to, ReadyForPickup | Cancelled),
-            PendingClarification => matches!(to, Assigned | Cancelled),
-            Unavailable => matches!(to, Unassigned),
-            ReadyForPickup => matches!(to, Done | Cancelled),
-            Done => false,
-            Cancelled => matches!(to, Unassigned),
+            // Standard Worker-driven transitions
+            Unassigned            => matches!(to, Assigned | Cancelled),
+            Assigned              => matches!(to, Accepted | Unavailable | PendingClarification | Cancelled),
+            Accepted              => matches!(to, ReadyForPickup | Cancelled),
+            PendingClarification  => matches!(to, Assigned | Cancelled),
+            Unavailable           => matches!(to, Unassigned | Cancelled),
+            ReadyForPickup        => matches!(to, Done | Cancelled),
+            // P04: Cancelled can be reset to Unassigned (OrderReset event)
+            Cancelled             => matches!(to, Unassigned),
+            // Done is terminal
+            Done                  => false,
         }
     }
 
