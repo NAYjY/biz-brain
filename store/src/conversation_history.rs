@@ -1,11 +1,19 @@
 //! P13: per-sender conversation history.  Sliding window of 20 messages,
 //! keyed on `channel:external_id`.  Oldest rows pruned on insert.
+//!
+//! Returns raw (role, content) pairs; callers in `api` convert to
+//! `agent::classify::HistoryMessage` — no circular crate dependency.
 
 use sqlx::PgPool;
 
-use agent::classify::HistoryMessage;
-
 const WINDOW_SIZE: i64 = 20;
+
+/// A single conversation turn (role = "user" | "assistant", content = text).
+#[derive(Debug, Clone)]
+pub struct HistoryRow {
+    pub role: String,
+    pub content: String,
+}
 
 pub struct ConversationHistoryRepository {
     pool: PgPool,
@@ -56,7 +64,7 @@ impl ConversationHistoryRepository {
     }
 
     /// Load the most recent `WINDOW_SIZE` messages for a sender, oldest first.
-    pub async fn load(&self, sender_key: &str) -> Result<Vec<HistoryMessage>, sqlx::Error> {
+    pub async fn load(&self, sender_key: &str) -> Result<Vec<HistoryRow>, sqlx::Error> {
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT role, content FROM ( \
                  SELECT id, role, content FROM conversation_history \
@@ -69,6 +77,9 @@ impl ConversationHistoryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|(role, content)| HistoryMessage { role, content }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(role, content)| HistoryRow { role, content })
+            .collect())
     }
 }

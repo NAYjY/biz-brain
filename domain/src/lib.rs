@@ -1,4 +1,5 @@
-//! Domain crate (T01): pure types, Events, state machines. No I/O, no async.
+//! Domain crate (T01 / P04 / P15): pure types, Events, state machines.
+//! No I/O, no async.
 
 #![warn(clippy::all)]
 
@@ -25,11 +26,12 @@ pub use ids::{
 pub use invoice::{Invoice, InvoiceItem, InvoiceState, InvoiceTransitionError};
 pub use order::{Order, OrderState, TransitionError as OrderTransitionError};
 pub use sse_event::SseSignal;
-pub use supply_request::{SupplyRequest, SupplyRequestState, TransitionError as SupplyRequestTransitionError};
+pub use supply_request::{
+    SupplyRequest, SupplyRequestState, TransitionError as SupplyRequestTransitionError,
+};
 
-/// Assignments + SupplyRequests relevant to an Order — carried alongside the
-/// state machine when the caller needs cross-aggregate context (not stored
-/// on Order itself; Assignment/SupplyRequest are separate aggregates, T01).
+/// Cross-aggregate context carried alongside an Order when the caller needs
+/// Assignment/SupplyRequest data (not stored on Order itself — T01).
 #[derive(Debug, Clone, Default)]
 pub struct OrderContext {
     pub assignments: Vec<Assignment>,

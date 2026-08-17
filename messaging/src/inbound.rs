@@ -1,7 +1,8 @@
-//! T04: the channel-agnostic webhook-ingestion flow. Verify -> parse ->
-//! insert each message into `webhook_inbox` (dedup) -> return. Callers (api
-//! crate's axum handler) invoke this then respond 200 immediately —
-//! processing happens later, async, in `process_inbox`.
+//! T04 / P05: channel-agnostic webhook-ingestion flow.
+//! Verify → parse → insert each message into `webhook_inbox` (dedup) → return.
+//!
+//! P05: `media_id` is persisted in the raw_payload JSON so the inbox_worker
+//! can pass it to `fetch_media` later without needing the original request.
 
 use domain::Channel;
 use store::WebhookInbox;
@@ -19,12 +20,15 @@ pub async fn receive<A: ChannelAdapter>(
     let messages = adapter.parse_events(raw_body)?;
 
     for msg in &messages {
+        // P05: include media_id in the persisted payload so inbox_worker can
+        // fetch the bytes asynchronously without the original HTTP request.
         let payload = serde_json::json!({
             "sender": msg.sender,
-            "text": msg.text,
+            "text":   msg.text,
+            "media_id": msg.media_id,
         });
-        // Duplicate is not an error at this layer — LINE/Telegram/WhatsApp can
-        // all redeliver (R01/R02/R03); the webhook handler still acks 200.
+
+        // Duplicate is not an error — LINE/WhatsApp/Telegram can all redeliver.
         let _ = inbox.record(channel, &msg.external_event_id, payload).await;
     }
 

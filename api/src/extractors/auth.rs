@@ -1,11 +1,6 @@
-//! T05: JWT in an httpOnly cookie. Carries Owner identity + owned Branch ids;
-//! no "active Branch" claim — Branch selection happens per-request via the
-//! URL, not session state (an Owner may have several Branches open in
-//! different tabs).
-//!
+//! T05 / S04: JWT in an httpOnly cookie.
+//! Carries Owner identity + owned Branch ids.
 //! S04: token_version claim checked against DB on every authenticated request.
-//! Bump owners.token_version on logout/password-change -> stale tokens
-//! rejected even if sig + exp still valid.
 
 use async_trait::async_trait;
 use axum::{
@@ -20,10 +15,10 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: Uuid,             // OwnerId
-    pub branch_ids: Vec<Uuid>, // owned Branches
+    pub sub: Uuid,
+    pub branch_ids: Vec<Uuid>,
     pub exp: usize,
-    /// S04: must match owners.token_version in DB. Stale = rejected.
+    /// S04: must match owners.token_version in DB.
     pub token_version: i32,
 }
 
@@ -33,8 +28,7 @@ impl Claims {
     }
 }
 
-/// Extractor that validates JWT sig + exp + token_version.
-/// Requires `PgPool` in state (via `FromRef`) for the token_version check.
+/// Extractor: validates JWT sig + exp + token_version.
 pub struct AuthedOwner(pub Claims);
 
 #[async_trait]
@@ -58,16 +52,19 @@ where
             .find_map(|kv| kv.strip_prefix("auth="))
             .ok_or((StatusCode::UNAUTHORIZED, "missing auth cookie"))?;
 
-        let secret =
-            std::env::var("JWT_SECRET").map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "JWT_SECRET unset"))?;
+        let secret = std::env::var("JWT_SECRET")
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "JWT_SECRET unset"))?;
 
-        // S02: real sig + exp validation (Validation::default = HS256 + exp check, rejects alg:none).
-        let data = decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default())
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid or expired token"))?;
+        let data = decode::<Claims>(
+            token,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &Validation::default(),
+        )
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid or expired token"))?;
 
         let claims = data.claims;
 
-        // S04: check token_version against DB. Stale token (bumped on logout) -> 401.
+        // S04: token_version check.
         let pool = PgPool::from_ref(state);
         let row: Option<(i32,)> =
             sqlx::query_as("SELECT token_version FROM owners WHERE id = $1")
@@ -76,11 +73,11 @@ where
                 .await
                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error during auth"))?;
 
-        let current_version = row
+        let current = row
             .map(|(v,)| v)
             .ok_or((StatusCode::UNAUTHORIZED, "owner not found"))?;
 
-        if claims.token_version != current_version {
+        if claims.token_version != current {
             return Err((StatusCode::UNAUTHORIZED, "session revoked"));
         }
 
@@ -103,7 +100,8 @@ where
     type Rejection = (StatusCode, &'static str);
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let AuthedOwner(claims) = parts.extract_with_state::<AuthedOwner, S>(state).await?;
+        let AuthedOwner(claims) =
+            parts.extract_with_state::<AuthedOwner, S>(state).await?;
 
         let Path(params) = parts
             .extract::<Path<std::collections::HashMap<String, String>>>()

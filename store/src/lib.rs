@@ -15,7 +15,7 @@ pub mod supply_request_events;
 pub mod webhook_inbox;
 
 pub use actor_directory::{ActorDirectory, PendingBinding};
-pub use conversation_history::ConversationHistoryRepository;
+pub use conversation_history::{ConversationHistoryRepository, HistoryRow};
 pub use disambiguation::DisambiguationStore;
 pub use event_sourcing::{AppendError, EventSourcing};
 pub use order_events::OrderEventRepository;

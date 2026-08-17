@@ -1,5 +1,9 @@
 //! T02: append domain events to the correct stream with optimistic
 //! concurrency via UNIQUE (aggregate_id, sequence).
+//!
+//! P04/P15: OwnerCancelled, OrderReset, ClarificationResolved added to the
+//! worker_id extraction match so they serialize correctly (worker_id is NULL
+//! for OwnerCancelled and OrderReset, Some for ClarificationResolved).
 
 use domain::{Aggregate, BranchId, DomainEvent, DomainEventVariant};
 use sqlx::PgPool;
@@ -22,8 +26,6 @@ impl EventSourcing {
     }
 
     /// Append `event` as the next sequence number in its aggregate's stream.
-    /// Caller supplies `expected_next_sequence` (typically `current_len + 1`);
-    /// a conflict means another writer already took that slot.
     pub async fn append(
         &self,
         branch_id: BranchId,
@@ -32,9 +34,12 @@ impl EventSourcing {
     ) -> Result<(), AppendError> {
         let variant = event.variant();
         match variant.aggregate() {
-            Aggregate::Order => self.append_order_event(branch_id, expected_next_sequence, variant, event).await,
+            Aggregate::Order => {
+                self.append_order_event(branch_id, expected_next_sequence, variant, event).await
+            }
             Aggregate::SupplyRequest => {
-                self.append_supply_request_event(branch_id, expected_next_sequence, variant, event).await
+                self.append_supply_request_event(branch_id, expected_next_sequence, variant, event)
+                    .await
             }
         }
     }
@@ -47,21 +52,26 @@ impl EventSourcing {
         event: &DomainEvent,
     ) -> Result<(), AppendError> {
         let aggregate_id = event.order_id().expect("Order-aggregate variant must carry order_id");
-        let worker_id = match event {
+
+        // worker_id is NULL for events that have no Worker context.
+        let worker_id: Option<uuid::Uuid> = match event {
             DomainEvent::WorkerAssigned { worker_id, .. }
             | DomainEvent::WorkerAccepted { worker_id, .. }
             | DomainEvent::WorkerUnavailable { worker_id, .. }
             | DomainEvent::WorkerCancelled { worker_id, .. }
             | DomainEvent::ClarificationRequested { worker_id, .. }
-            | DomainEvent::WorkerReadyForPickup { worker_id, .. } => Some(worker_id.into_inner()),
+            | DomainEvent::WorkerReadyForPickup { worker_id, .. }
+            | DomainEvent::ClarificationResolved { worker_id, .. } => {
+                Some(worker_id.into_inner())
+            }
+            // OrderDone, OwnerCancelled, OrderReset carry no worker_id.
             _ => None,
         };
 
         let result = sqlx::query(
-            r#"
-            INSERT INTO order_events (aggregate_id, sequence, branch_id, event_type, worker_id)
-            VALUES ($1, $2, $3, $4, $5)
-            "#,
+            "INSERT INTO order_events \
+                 (aggregate_id, sequence, branch_id, event_type, worker_id) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(aggregate_id.into_inner())
         .bind(sequence)
@@ -81,8 +91,9 @@ impl EventSourcing {
         variant: DomainEventVariant,
         event: &DomainEvent,
     ) -> Result<(), AppendError> {
-        let aggregate_id =
-            event.supply_request_id().expect("SupplyRequest-aggregate variant must carry supply_request_id");
+        let aggregate_id = event
+            .supply_request_id()
+            .expect("SupplyRequest-aggregate variant must carry supply_request_id");
 
         let (supplier_id, invoice_id) = match event {
             DomainEvent::InvoiceReceived { supplier_id, invoice_id, .. } => {
@@ -91,15 +102,16 @@ impl EventSourcing {
             DomainEvent::SupplierConfirmed { supplier_id, invoice_id, .. } => {
                 (Some(supplier_id.into_inner()), Some(invoice_id.into_inner()))
             }
-            DomainEvent::InvoiceApproved { invoice_id, .. } => (None, Some(invoice_id.into_inner())),
+            DomainEvent::InvoiceApproved { invoice_id, .. } => {
+                (None, Some(invoice_id.into_inner()))
+            }
             _ => (None, None),
         };
 
         let result = sqlx::query(
-            r#"
-            INSERT INTO supply_request_events (aggregate_id, sequence, branch_id, event_type, supplier_id, invoice_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
+            "INSERT INTO supply_request_events \
+                 (aggregate_id, sequence, branch_id, event_type, supplier_id, invoice_id) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(aggregate_id.into_inner())
         .bind(sequence)
@@ -113,10 +125,16 @@ impl EventSourcing {
         self.map_conflict(result, sequence)
     }
 
-    fn map_conflict(&self, result: Result<sqlx::postgres::PgQueryResult, sqlx::Error>, sequence: i64) -> Result<(), AppendError> {
+    fn map_conflict(
+        &self,
+        result: Result<sqlx::postgres::PgQueryResult, sqlx::Error>,
+        sequence: i64,
+    ) -> Result<(), AppendError> {
         match result {
             Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => Err(AppendError::Conflict(sequence)),
+            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                Err(AppendError::Conflict(sequence))
+            }
             Err(e) => Err(AppendError::Database(e)),
         }
     }
