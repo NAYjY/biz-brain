@@ -1,8 +1,6 @@
 /**
- * D05: Supply Requests page — client-side logic.
- * D08-4: Send button for DRAFT state rows.
- * D03 pattern: SupplyRequestChanged signal -> re-fetch whole list.
- * Approve-Invoice: confirm-before-submit (D05: financial commitment).
+ * D05 / P05: Supply Requests page — client-side logic.
+ * P05: Approve-Invoice modal now shows inline media (image/PDF) when available.
  */
 
 function initSupplyRequestsPage(branchId) {
@@ -10,17 +8,14 @@ function initSupplyRequestsPage(branchId) {
 
   let pendingApproveSupplyRequestId = null;
 
-  // ── SSE wiring (D06) ─────────────────────────────────────────────── //
+  // ── SSE wiring ───────────────────────────────────────────────────── //
 
   new BranchEventSource(branchId)
     .withBadge(document.getElementById('live-badge'))
     .on('SupplyRequestChanged', () => refreshList())
     .connect();
 
-  // ── Initial loaders ──────────────────────────────────────────────── //
-
   loadInFlightOrders();
-  // D08-3 equivalent: attach actions to SSR rows immediately
   attachRowActions();
 
   // ── List refresh ─────────────────────────────────────────────────── //
@@ -45,7 +40,6 @@ function initSupplyRequestsPage(branchId) {
     const chips = (sr.order_ids ?? [])
       .map(id => `<a href="/branches/${branchId}/orders" class="chip" title="${id}">${BB.shortId(id)}</a>`)
       .join('');
-
     return `
       <tr data-sr-id="${sr.id}">
         <td>${pill}</td>
@@ -64,10 +58,8 @@ function initSupplyRequestsPage(branchId) {
     const row = container.closest('tr');
     const statePill = row?.querySelector('.state-pill');
     const state = statePill?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
-
     container.innerHTML = '';
 
-    // D08-4: Send button for DRAFT state
     if (state === 'DRAFT') {
       const btn = document.createElement('button');
       btn.className = 'btn btn--primary btn--sm';
@@ -77,30 +69,22 @@ function initSupplyRequestsPage(branchId) {
     }
 
     if (state === 'INVOICE_RECEIVED') {
-      const btn = approveBtn(srId);
+      const btn = document.createElement('button');
+      btn.className = 'btn btn--primary btn--sm';
+      btn.textContent = 'Approve Invoice';
+      btn.onclick = () => openApproveInvoice(srId);
       container.appendChild(btn);
     }
   }
 
-  function approveBtn(srId) {
-    const b = document.createElement('button');
-    b.className = 'btn btn--primary btn--sm';
-    b.textContent = 'Approve Invoice';
-    b.onclick = () => openApproveInvoice(srId);
-    return b;
-  }
+  // ── Send supply request ───────────────────────────────────────────── //
 
-  // D08-4: Send supply request to supplier
   async function sendSupplyRequest(srId) {
-    const ok = await BB.confirm(
-      'Send this supply request to the Supplier? They will receive it via WhatsApp.'
-    );
+    const ok = await BB.confirm('Send to Supplier via WhatsApp?');
     if (!ok) return;
-
     try {
       await api(`/supply-requests/${srId}/send`, { method: 'POST' });
       BB.showToast('Supply request sent', 'success');
-      // SSE signal will trigger re-fetch; also refresh immediately
       await refreshList();
     } catch (e) {
       BB.showToast(`Send failed: ${e.message}`, 'error');
@@ -130,7 +114,7 @@ function initSupplyRequestsPage(branchId) {
     }
   });
 
-  // ── Approve Invoice ───────────────────────────────────────────────── //
+  // ── Approve Invoice (P05: with media preview) ─────────────────────── //
 
   async function openApproveInvoice(srId) {
     pendingApproveSupplyRequestId = srId;
@@ -138,13 +122,38 @@ function initSupplyRequestsPage(branchId) {
     BB.openModal('approve-invoice-modal');
   }
 
+  document.getElementById('approve-invoice-select').addEventListener('change', async (e) => {
+    const invoiceId = e.target.value;
+    await renderInvoiceMedia(invoiceId);
+  });
+
+  async function renderInvoiceMedia(invoiceId) {
+    const container = document.getElementById('invoice-media-preview');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!invoiceId) return;
+
+    // Check if this invoice has media.
+    const invoices = await api('/invoices?state=Sent').catch(() => []);
+    const invoice = invoices.find(i => i.id === invoiceId);
+    if (!invoice?.has_media) {
+      container.innerHTML = '<p class="text-xs text-muted">No image attached.</p>';
+      return;
+    }
+
+    // P05: load the media via the dedicated endpoint.
+    const mediaUrl = `/api/v1/branches/${branchId}/invoices/${invoiceId}/media`;
+    container.innerHTML = `
+      <img src="${mediaUrl}" alt="Invoice media"
+           style="max-width:100%;border-radius:var(--radius-sm);border:1px solid var(--color-border);"
+           onerror="this.replaceWith(Object.assign(document.createElement('a'), {href:'${mediaUrl}',textContent:'Download invoice',target:'_blank',className:'btn btn--ghost btn--sm'}))">`;
+  }
+
   document.getElementById('approve-invoice-btn').addEventListener('click', async () => {
     const invoiceId = document.getElementById('approve-invoice-select').value;
     if (!invoiceId) { BB.showToast('Select an invoice', 'error'); return; }
 
-    const ok = await BB.confirm(
-      'Approve this invoice? This is a financial commitment and cannot be undone.'
-    );
+    const ok = await BB.confirm('Approve this invoice? This is a financial commitment and cannot be undone.');
     if (!ok) return;
 
     try {
@@ -180,10 +189,13 @@ function initSupplyRequestsPage(branchId) {
       const sel = document.getElementById('approve-invoice-select');
       if (relevant.length === 0) {
         sel.innerHTML = '<option value="">No Sent invoices for this request</option>';
+        document.getElementById('invoice-media-preview').innerHTML = '';
       } else {
         sel.innerHTML = relevant
-          .map(i => `<option value="${i.id}">${BB.shortId(i.id)}${i.notes ? ` — ${BB.escapeHtml(i.notes)}` : ''}</option>`)
+          .map(i => `<option value="${i.id}">${BB.shortId(i.id)}${i.notes ? ` — ${BB.escapeHtml(i.notes)}` : ''}${i.has_media ? ' 📎' : ''}</option>`)
           .join('');
+        // Render media for first invoice immediately.
+        await renderInvoiceMedia(relevant[0].id);
       }
     } catch { /* non-fatal */ }
   }

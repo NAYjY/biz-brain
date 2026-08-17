@@ -1,6 +1,6 @@
 /**
- * D04: Orders page — client-side logic.
- * Shows last Worker message under each order row.
+ * D04 / P04: Orders page — client-side logic.
+ * P04: Cancel, Reset, Resolve-Clarification inline row actions added.
  * Owner can reply to Worker directly from dashboard on any order state.
  */
 
@@ -49,7 +49,6 @@ function initOrdersPage(branchId) {
       ? `<span class="font-mono text-xs">${BB.shortId(o.worker_id)}</span>`
       : '—';
 
-    // Worker message bubble — shown whenever there is a last message
     const messageRow = o.last_worker_message ? `
       <tr class="worker-message-row">
         <td colspan="5">
@@ -57,12 +56,11 @@ function initOrdersPage(branchId) {
             <span class="worker-message-label">Worker said:</span>
             <span class="worker-message-text">${BB.escapeHtml(o.last_worker_message)}</span>
             <div class="worker-reply-box">
-              <input class="form-input worker-reply-input"
-                     type="text"
-                     placeholder="Reply to worker…"
+              <input class="form-input worker-reply-input" type="text"
+                     placeholder="${o.state === 'PENDING_CLARIFICATION' ? 'Reply to resolve clarification…' : 'Reply to worker…'}"
                      id="reply-${o.id}">
               <button class="btn btn--primary btn--sm"
-                      onclick="sendWorkerReply('${o.id}')">Send</button>
+                      onclick="sendWorkerReply('${o.id}', '${o.state}')">Send</button>
             </div>
           </div>
         </td>
@@ -90,14 +88,30 @@ function initOrdersPage(branchId) {
 
     container.innerHTML = '';
 
+    // Assign button for unassigned / unavailable / cancelled states
     if (['UNASSIGNED', 'UNAVAILABLE', 'CANCELLED'].includes(state)) {
       const btn = actionBtn('Assign', 'btn--ghost btn--sm');
       btn.onclick = () => openAssignWorker(orderId);
       container.appendChild(btn);
     }
 
-    if (!['DONE', 'CANCELLED'].includes(state) && state !== '') {
-      const btn = actionBtn('Close', 'btn--danger btn--sm');
+    // P04: Cancel button — all non-Done, non-Cancelled states
+    if (!['DONE', 'CANCELLED', ''].includes(state)) {
+      const btn = actionBtn('Cancel', 'btn--danger btn--sm');
+      btn.onclick = () => cancelOrder(orderId);
+      container.appendChild(btn);
+    }
+
+    // P04: Reset button — Cancelled or Unavailable
+    if (['CANCELLED', 'UNAVAILABLE'].includes(state)) {
+      const btn = actionBtn('Reset', 'btn--ghost btn--sm');
+      btn.onclick = () => resetOrder(orderId);
+      container.appendChild(btn);
+    }
+
+    // Close button — active non-Done states
+    if (!['DONE', 'CANCELLED', 'UNASSIGNED', ''].includes(state)) {
+      const btn = actionBtn('Close', 'btn--ghost btn--sm');
       btn.onclick = () => closeOrder(orderId);
       container.appendChild(btn);
     }
@@ -110,20 +124,25 @@ function initOrdersPage(branchId) {
     return b;
   }
 
-  // ── Send reply to Worker ──────────────────────────────────────────── //
+  // ── Worker reply / P04 resolve clarification ─────────────────────── //
 
-  window.sendWorkerReply = async (orderId) => {
+  window.sendWorkerReply = async (orderId, orderState) => {
     const input = document.getElementById(`reply-${orderId}`);
     const text = input?.value.trim();
     if (!text) { BB.showToast('Type a message first', 'error'); return; }
 
+    const isClarification = orderState === 'PENDING_CLARIFICATION';
+    const endpoint = isClarification
+      ? `/orders/${orderId}/resolve-clarification`
+      : `/orders/${orderId}/message-worker`;
+
     try {
-      await api(`/orders/${orderId}/message-worker`, {
+      await api(endpoint, {
         method: 'POST',
-        body: JSON.stringify({ text }),
+        body: JSON.stringify(isClarification ? { message: text } : { text }),
       });
       input.value = '';
-      BB.showToast('Message sent to worker ✓', 'success');
+      BB.showToast(isClarification ? 'Clarification resolved ✓' : 'Message sent ✓', 'success');
     } catch (e) {
       BB.showToast(`Send failed: ${e.message}`, 'error');
     }
@@ -145,7 +164,6 @@ function initOrdersPage(branchId) {
     if (!description) { BB.showToast('Description required', 'error'); return; }
 
     let customerId = customerEl.value;
-
     const newName = newNameEl.value.trim();
     if (newName) {
       try {
@@ -189,9 +207,7 @@ function initOrdersPage(branchId) {
     const workerId = document.getElementById('assign-worker-select').value;
     if (!workerId) { BB.showToast('Select a worker', 'error'); return; }
 
-    const ok = await BB.confirm(
-      'Assign this worker? A message will be sent to them immediately.'
-    );
+    const ok = await BB.confirm('Assign this worker? A message will be sent to them immediately.');
     if (!ok) return;
 
     try {
@@ -206,12 +222,33 @@ function initOrdersPage(branchId) {
     }
   });
 
-  // ── Close Order ──────────────────────────────────────────────────── //
+  // ── P04: Cancel / Reset / Close ──────────────────────────────────── //
+
+  async function cancelOrder(orderId) {
+    const ok = await BB.confirm('Cancel this order? The Worker will be notified.');
+    if (!ok) return;
+    try {
+      await api(`/orders/${orderId}/cancel`, { method: 'POST' });
+      BB.showToast('Order cancelled', 'success');
+    } catch (e) {
+      BB.showToast(`Cancel failed: ${e.message}`, 'error');
+    }
+  }
+
+  async function resetOrder(orderId) {
+    const ok = await BB.confirm('Reset this order back to Unassigned?');
+    if (!ok) return;
+    try {
+      await api(`/orders/${orderId}/reset`, { method: 'POST' });
+      BB.showToast('Order reset to Unassigned', 'success');
+    } catch (e) {
+      BB.showToast(`Reset failed: ${e.message}`, 'error');
+    }
+  }
 
   async function closeOrder(orderId) {
     const ok = await BB.confirm('Close this order? This marks it as Done.');
     if (!ok) return;
-
     try {
       await api(`/orders/${orderId}/close`, { method: 'POST' });
       BB.showToast('Order closed', 'success');
@@ -227,12 +264,9 @@ function initOrdersPage(branchId) {
       const customers = await api('/customers');
       customerMap = {};
       customers.forEach(c => { customerMap[c.id] = c.name; });
-
       const sel = document.getElementById('order-customer');
       sel.innerHTML = '<option value="">Select customer…</option>' +
-        customers.map(c =>
-          `<option value="${c.id}">${BB.escapeHtml(c.name)}</option>`
-        ).join('');
+        customers.map(c => `<option value="${c.id}">${BB.escapeHtml(c.name)}</option>`).join('');
     } catch { /* non-fatal */ }
   }
 
@@ -241,9 +275,7 @@ function initOrdersPage(branchId) {
       const workers = await api('/workers');
       const sel = document.getElementById('assign-worker-select');
       sel.innerHTML = '<option value="">Select worker…</option>' +
-        workers.map(w =>
-          `<option value="${w.id}">${BB.escapeHtml(w.name)}</option>`
-        ).join('');
+        workers.map(w => `<option value="${w.id}">${BB.escapeHtml(w.name)}</option>`).join('');
     } catch { /* non-fatal */ }
   }
 }
