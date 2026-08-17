@@ -1,10 +1,12 @@
-//! D02: Branch management.
-//! POST /api/v1/branches — Owner creates a new Branch (in-dashboard, not seed).
-//! GET  /api/v1/branches — list owned Branches (for navigation / branch picker).
+//! D02 / P01: Branch management.
+//! POST /api/v1/branches — seeds reply templates on creation (P01).
+//! GET  /api/v1/branches — list owned Branches.
 
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use store::ReplyTemplateRepository;
 
 use crate::{extractors::AuthedOwner, state::AppState};
 
@@ -51,6 +53,12 @@ pub async fn create_branch(
         .bind(claims.sub)
         .bind(&req.name)
         .execute(&state.pool)
+        .await
+        .map_err(internal)?;
+
+    // P01: seed default reply templates for the new Branch.
+    ReplyTemplateRepository::new(state.pool.clone())
+        .seed_defaults(id)
         .await
         .map_err(internal)?;
 

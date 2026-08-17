@@ -1,23 +1,22 @@
 //! Shared application state threaded through every axum handler.
+//!
+//! P01: `reply_templates` added.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent::{ClaudeClassifier, SupplierAgent, WorkerAgent};
-use messaging::{LineAdapter, WhatsAppAdapter, TelegramAdapter};
+use domain::SseSignal;
+use messaging::{LineAdapter, TelegramAdapter, WhatsAppAdapter};
 use sqlx::PgPool;
 use store::{
     ActorDirectory, EventSourcing, OrderEventRepository, ProjectionTables, ProjectionWorker,
-    SupplyRequestEventRepository, WebhookInbox,
+    ReplyTemplateRepository, SupplyRequestEventRepository, WebhookInbox,
 };
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 
-use domain::SseSignal;
-
-
 use axum::extract::FromRef;
-
 
 #[derive(Clone)]
 pub struct AppState {
@@ -29,14 +28,14 @@ pub struct AppState {
     pub projection_worker: Arc<ProjectionWorker>,
     pub inbox: Arc<WebhookInbox>,
     pub actors: Arc<ActorDirectory>,
+    pub reply_templates: Arc<ReplyTemplateRepository>,
     pub line: Arc<LineAdapter>,
     pub whatsapp: Arc<WhatsAppAdapter>,
     pub telegram: Arc<TelegramAdapter>,
     pub worker_agent: Arc<WorkerAgent>,
     pub supplier_agent: Arc<SupplierAgent>,
     pub threads: Arc<Mutex<agent::ThreadContextStore>>,
-    /// T07: one broadcast channel per Branch. Lazily created on first
-    /// subscriber/publish (a Branch with no open dashboard tab needs none).
+    /// T07: one broadcast channel per Branch, lazily created.
     pub sse_branches: Arc<Mutex<HashMap<Uuid, broadcast::Sender<SseSignal>>>>,
 }
 
@@ -63,6 +62,7 @@ impl AppState {
             projection_worker: Arc::new(ProjectionWorker::new(pool.clone())),
             inbox: Arc::new(WebhookInbox::new(pool.clone())),
             actors: Arc::new(ActorDirectory::new(pool.clone())),
+            reply_templates: Arc::new(ReplyTemplateRepository::new(pool.clone())),
             line: Arc::new(line),
             whatsapp: Arc::new(whatsapp),
             telegram: Arc::new(telegram),
@@ -74,17 +74,19 @@ impl AppState {
         }
     }
 
-    /// Publish a T07 invalidation signal to any dashboard tabs subscribed to
-    /// its Branch. No-op if nobody is listening (channel not yet created).
+    /// Publish a T07 invalidation signal. No-op if nobody is listening.
     pub async fn publish_sse(&self, signal: SseSignal) {
         let branches = self.sse_branches.lock().await;
         if let Some(tx) = branches.get(&signal.branch_id().into_inner()) {
-            let _ = tx.send(signal); // Err just means zero current subscribers — fine.
+            let _ = tx.send(signal);
         }
     }
 
     pub async fn sse_receiver(&self, branch_id: Uuid) -> broadcast::Receiver<SseSignal> {
         let mut branches = self.sse_branches.lock().await;
-        branches.entry(branch_id).or_insert_with(|| broadcast::channel(64).0).subscribe()
+        branches
+            .entry(branch_id)
+            .or_insert_with(|| broadcast::channel(64).0)
+            .subscribe()
     }
 }

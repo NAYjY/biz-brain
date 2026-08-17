@@ -1,12 +1,12 @@
-//! D05: Invoice listing endpoint.
-//! GET /api/v1/branches/:branch_id/invoices?state=Sent
-//!
-//! Returns invoices from `invoice_current_state` projection.
-//! Default filter: state=Sent (only actionable invoices shown in Approve-Invoice picker).
+//! D05 / P05: Invoice endpoints.
+//! GET /api/v1/branches/:branch_id/invoices          — list by state filter
+//! GET /api/v1/branches/:branch_id/invoices/:id/media — P05: serve stored media bytes
 
 use axum::{
-    extract::{Query, State},
-    http::StatusCode,
+    body::Body,
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,8 @@ pub struct InvoiceView {
     pub supplier_id: Uuid,
     pub state: String,
     pub notes: Option<String>,
+    /// P05: true when media bytes are stored.
+    pub has_media: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,11 +37,13 @@ pub async fn list_invoices(
 ) -> Result<Json<Vec<InvoiceView>>, (StatusCode, String)> {
     let state_filter = filter.state.as_deref().unwrap_or("Sent");
 
-    let rows: Vec<(Uuid, Uuid, Uuid, String, Option<String>)> = sqlx::query_as(
-        "SELECT invoice_id, supply_request_id, supplier_id, state, notes
-         FROM invoice_current_state
-         WHERE branch_id = $1 AND state = $2
-         ORDER BY updated_at DESC",
+    let rows: Vec<(Uuid, Uuid, Uuid, String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT ics.invoice_id, ics.supply_request_id, ics.supplier_id, ics.state, ics.notes,
+                (i.media_data IS NOT NULL) AS has_media
+         FROM invoice_current_state ics
+         JOIN invoices i ON i.id = ics.invoice_id
+         WHERE ics.branch_id = $1 AND ics.state = $2
+         ORDER BY ics.updated_at DESC",
     )
     .bind(branch_id)
     .bind(state_filter)
@@ -49,15 +53,55 @@ pub async fn list_invoices(
 
     Ok(Json(
         rows.into_iter()
-            .map(|(id, supply_request_id, supplier_id, st, notes)| InvoiceView {
+            .map(|(id, supply_request_id, supplier_id, st, notes, has_media)| InvoiceView {
                 id,
                 supply_request_id,
                 supplier_id,
                 state: st,
                 notes,
+                has_media,
             })
             .collect(),
     ))
+}
+
+/// P05: serve the raw media bytes for an invoice.
+/// The Owner opens this URL in the dashboard modal to view the image/PDF.
+pub async fn get_invoice_media(
+    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> Response {
+    let invoice_id = match params
+        .get("invoice_id")
+        .and_then(|id| id.parse::<Uuid>().ok())
+    {
+        Some(id) => id,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    // Verify the invoice belongs to this Branch.
+    let row: Option<(Vec<u8>, String)> = sqlx::query_as(
+        "SELECT i.media_data, COALESCE(i.media_mime_type, 'application/octet-stream') \
+         FROM invoices i \
+         JOIN invoice_current_state ics ON ics.invoice_id = i.id \
+         WHERE i.id = $1 AND ics.branch_id = $2 AND i.media_data IS NOT NULL",
+    )
+    .bind(invoice_id)
+    .bind(branch_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    match row {
+        Some((data, mime_type)) => (
+            [(header::CONTENT_TYPE, mime_type)],
+            Body::from(data),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
