@@ -1,13 +1,15 @@
-//! LINE adapter. R01: `events[]` array (can be empty), verify via
-//! `x-line-signature` HMAC-SHA256 of the raw body against the channel secret,
-//! reply tokens are one-time-use and expire fast.
+//! LINE adapter. R01: `events[]` array, verify via `x-line-signature`
+//! HMAC-SHA256 of the raw body against the channel secret.
+//! Reply tokens are one-time-use and expire fast.
+//!
+//! P05: `fetch_media` stub — LINE is Worker-only, never called on Supplier path.
 
 use domain::{Channel, ChannelIdentity};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 
-use crate::channel_trait::{http_like::Headers, ChannelAdapter, ChannelError, InboundMessage};
+use crate::channel_trait::{http_like::Headers, ChannelAdapter, ChannelError, InboundMessage, MediaBlob};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -46,12 +48,18 @@ struct LineMessage {
 }
 
 impl LineAdapter {
-    pub fn new(channel_secret: impl Into<String>, channel_access_token: impl Into<String>) -> Self {
-        Self { channel_secret: channel_secret.into(), channel_access_token: channel_access_token.into(), http: reqwest::Client::new() }
+    pub fn new(
+        channel_secret: impl Into<String>,
+        channel_access_token: impl Into<String>,
+    ) -> Self {
+        Self {
+            channel_secret: channel_secret.into(),
+            channel_access_token: channel_access_token.into(),
+            http: reqwest::Client::new(),
+        }
     }
 
-    /// Synchronous in-handler ack (T04) — the only legitimate use of a reply
-    /// token, since it's still guaranteed valid at this point in the request.
+    /// Synchronous in-handler ack (T04) — the only legitimate use of a reply token.
     pub async fn reply(&self, reply_token: &str, text: &str) -> Result<(), ChannelError> {
         self.http
             .post("https://api.line.me/v2/bot/message/reply")
@@ -69,13 +77,14 @@ impl LineAdapter {
 
 impl ChannelAdapter for LineAdapter {
     fn verify(&self, headers: &Headers, raw_body: &[u8]) -> Result<(), ChannelError> {
-        let signature = headers.get("x-line-signature").ok_or(ChannelError::VerificationFailed)?;
+        let signature = headers
+            .get("x-line-signature")
+            .ok_or(ChannelError::VerificationFailed)?;
 
         let mut mac = HmacSha256::new_from_slice(self.channel_secret.as_bytes())
             .map_err(|_| ChannelError::VerificationFailed)?;
         mac.update(raw_body);
-        let expected = mac.finalize().into_bytes();
-        let expected_b64 = base64_encode(&expected);
+        let expected_b64 = base64_encode(&mac.finalize().into_bytes());
 
         if expected_b64 != signature {
             return Err(ChannelError::VerificationFailed);
@@ -84,7 +93,8 @@ impl ChannelAdapter for LineAdapter {
     }
 
     fn parse_events(&self, raw_body: &[u8]) -> Result<Vec<InboundMessage>, ChannelError> {
-        let body: WebhookBody = serde_json::from_slice(raw_body).map_err(|e| ChannelError::ParseFailed(e.to_string()))?;
+        let body: WebhookBody = serde_json::from_slice(raw_body)
+            .map_err(|e| ChannelError::ParseFailed(e.to_string()))?;
 
         Ok(body
             .events
@@ -93,36 +103,55 @@ impl ChannelAdapter for LineAdapter {
             .filter_map(|e| {
                 let text = e.message.as_ref()?.text.clone()?;
                 Some(InboundMessage {
-                    sender: ChannelIdentity { channel: Channel::Line, external_id: e.source.user_id },
+                    sender: ChannelIdentity {
+                        channel: Channel::Line,
+                        external_id: e.source.user_id,
+                    },
                     text,
                     external_event_id: e.webhook_event_id,
                     reply_token: e.reply_token,
+                    media_id: None, // LINE Worker path never carries invoice media
                 })
             })
             .collect())
     }
 
-    fn send_push(&self, recipient: &ChannelIdentity, text: &str) -> impl std::future::Future<Output = Result<(), ChannelError>> + Send {
+    fn send_push(
+        &self,
+        recipient: &ChannelIdentity,
+        text: &str,
+    ) -> impl std::future::Future<Output = Result<(), ChannelError>> + Send {
+        let payload = serde_json::json!({
+            "to": recipient.external_id,
+            "messages": [{ "type": "text", "text": text }],
+        });
+        let req = self
+            .http
+            .post("https://api.line.me/v2/bot/message/push")
+            .bearer_auth(&self.channel_access_token)
+            .json(&payload);
+
         async move {
-            self.http
-                .post("https://api.line.me/v2/bot/message/push")
-                .bearer_auth(&self.channel_access_token)
-                .json(&serde_json::json!({
-                    "to": recipient.external_id,
-                    "messages": [{ "type": "text", "text": text }],
-                }))
-                .send()
+            req.send()
                 .await
                 .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
             Ok(())
         }
     }
+
+    /// P05 stub — LINE is Worker-only, never called in the Supplier path.
+    fn fetch_media(
+        &self,
+        _media_id: &str,
+    ) -> impl std::future::Future<Output = Result<MediaBlob, ChannelError>> + Send {
+        async { Err(ChannelError::MediaFetchUnsupported) }
+    }
 }
 
-/// Minimal base64 (standard, with padding) — avoids pulling in the `base64` crate for one call.
+/// Minimal base64 (standard, with padding) — avoids pulling in the `base64` crate.
 fn base64_encode(bytes: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0];
         let b1 = *chunk.get(1).unwrap_or(&0);

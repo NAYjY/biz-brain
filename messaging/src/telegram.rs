@@ -1,10 +1,14 @@
+//! Telegram adapter. R03: `X-Telegram-Bot-Api-Secret-Token` header check.
+//! P05: `fetch_media` stub — Telegram is Worker-only, never called on Supplier path.
+
 use domain::{Channel, ChannelIdentity};
 use serde::Deserialize;
-use crate::channel_trait::{http_like::Headers, ChannelAdapter, ChannelError, InboundMessage};
+
+use crate::channel_trait::{http_like::Headers, ChannelAdapter, ChannelError, InboundMessage, MediaBlob};
 
 pub struct TelegramAdapter {
-    secret_token: String,   // X-Telegram-Bot-Api-Secret-Token
-    bot_token: String,      // for Bot API calls
+    secret_token: String,
+    bot_token: String,
     http: reqwest::Client,
 }
 
@@ -34,10 +38,14 @@ impl TelegramAdapter {
         }
     }
 
-    /// One-time: register webhook URL with Telegram.
+    /// One-time webhook registration. P11: called from admin endpoint or
+    /// startup task gated on an env var flag.
     pub async fn set_webhook(&self, url: &str) -> Result<(), ChannelError> {
         self.http
-            .post(format!("https://api.telegram.org/bot{}/setWebhook", self.bot_token))
+            .post(format!(
+                "https://api.telegram.org/bot{}/setWebhook",
+                self.bot_token
+            ))
             .json(&serde_json::json!({ "url": url, "secret_token": self.secret_token }))
             .send()
             .await
@@ -48,11 +56,11 @@ impl TelegramAdapter {
 
 impl ChannelAdapter for TelegramAdapter {
     fn verify(&self, headers: &Headers, _raw_body: &[u8]) -> Result<(), ChannelError> {
-        // R03: static string compare, not HMAC
-        let tok = headers
+        // R03: static string compare, not HMAC.
+        let token = headers
             .get("x-telegram-bot-api-secret-token")
             .ok_or(ChannelError::VerificationFailed)?;
-        if tok != self.secret_token {
+        if token != self.secret_token {
             return Err(ChannelError::VerificationFailed);
         }
         Ok(())
@@ -62,9 +70,9 @@ impl ChannelAdapter for TelegramAdapter {
         let update: Update = serde_json::from_slice(raw_body)
             .map_err(|e| ChannelError::ParseFailed(e.to_string()))?;
 
-        let Some(msg) = update.message else { return Ok(vec![]); };
-        let Some(from) = msg.from else { return Ok(vec![]); };
-        let Some(text) = msg.text else { return Ok(vec![]); };
+        let Some(msg) = update.message else { return Ok(vec![]) };
+        let Some(from) = msg.from else { return Ok(vec![]) };
+        let Some(text) = msg.text else { return Ok(vec![]) };
 
         Ok(vec![InboundMessage {
             sender: ChannelIdentity {
@@ -72,9 +80,9 @@ impl ChannelAdapter for TelegramAdapter {
                 external_id: from.id.to_string(),
             },
             text,
-            // R03: update_id sequential+unique per bot -> safe dedup key
             external_event_id: update.update_id.to_string(),
-            reply_token: None, // no reply-token concept
+            reply_token: None,
+            media_id: None,
         }])
     }
 
@@ -83,21 +91,23 @@ impl ChannelAdapter for TelegramAdapter {
         recipient: &ChannelIdentity,
         text: &str,
     ) -> impl std::future::Future<Output = Result<(), ChannelError>> + Send {
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+        let payload = serde_json::json!({ "chat_id": recipient.external_id, "text": text });
+        let req = self.http.post(url).json(&payload);
+
         async move {
-            let url = format!(
-                "https://api.telegram.org/bot{}/sendMessage",
-                self.bot_token
-            );
-            self.http
-                .post(url)
-                .json(&serde_json::json!({
-                    "chat_id": recipient.external_id,
-                    "text": text,
-                }))
-                .send()
+            req.send()
                 .await
                 .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
             Ok(())
         }
+    }
+
+    /// P05 stub — Telegram is Worker-only.
+    fn fetch_media(
+        &self,
+        _media_id: &str,
+    ) -> impl std::future::Future<Output = Result<MediaBlob, ChannelError>> + Send {
+        async { Err(ChannelError::MediaFetchUnsupported) }
     }
 }
