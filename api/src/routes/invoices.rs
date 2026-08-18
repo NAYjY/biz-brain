@@ -1,6 +1,6 @@
 //! D05 / P05: Invoice endpoints.
-//! GET /api/v1/branches/:branch_id/invoices          — list by state filter
-//! GET /api/v1/branches/:branch_id/invoices/:id/media — P05: serve stored media bytes
+//! GET /api/v1/branches/:branch_id/invoices
+//! GET /api/v1/branches/:branch_id/invoices/:invoice_id/media  (P05)
 
 use axum::{
     body::Body,
@@ -21,7 +21,6 @@ pub struct InvoiceView {
     pub supplier_id: Uuid,
     pub state: String,
     pub notes: Option<String>,
-    /// P05: true when media bytes are stored.
     pub has_media: bool,
 }
 
@@ -38,11 +37,11 @@ pub async fn list_invoices(
     let state_filter = filter.state.as_deref().unwrap_or("Sent");
 
     let rows: Vec<(Uuid, Uuid, Uuid, String, Option<String>, bool)> = sqlx::query_as(
-        "SELECT ics.invoice_id, ics.supply_request_id, ics.supplier_id, ics.state, ics.notes,
-                (i.media_data IS NOT NULL) AS has_media
-         FROM invoice_current_state ics
-         JOIN invoices i ON i.id = ics.invoice_id
-         WHERE ics.branch_id = $1 AND ics.state = $2
+        "SELECT ics.invoice_id, ics.supply_request_id, ics.supplier_id, ics.state, ics.notes, \
+                (i.media_data IS NOT NULL) AS has_media \
+         FROM invoice_current_state ics \
+         JOIN invoices i ON i.id = ics.invoice_id \
+         WHERE ics.branch_id = $1 AND ics.state = $2 \
          ORDER BY ics.updated_at DESC",
     )
     .bind(branch_id)
@@ -51,29 +50,18 @@ pub async fn list_invoices(
     .await
     .map_err(internal)?;
 
-    Ok(Json(
-        rows.into_iter()
-            .map(|(id, supply_request_id, supplier_id, st, notes, has_media)| InvoiceView {
-                id,
-                supply_request_id,
-                supplier_id,
-                state: st,
-                notes,
-                has_media,
-            })
-            .collect(),
-    ))
+    Ok(Json(rows.into_iter().map(|(id, supply_request_id, supplier_id, st, notes, has_media)| {
+        InvoiceView { id, supply_request_id, supplier_id, state: st, notes, has_media }
+    }).collect()))
 }
 
-/// P05: serve the raw media bytes for an invoice.
-/// The Owner opens this URL in the dashboard modal to view the image/PDF.
+/// P05: serve raw media bytes for an invoice.
+/// Uses typed Path<(Uuid, Uuid)> to avoid double-Path extraction.
 pub async fn get_invoice_media(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(invoice_id): Path<Uuid>,
+    Path((_branch_id, invoice_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
 ) -> Response {
-
-    // Verify the invoice belongs to this Branch.
     let row: Option<(Vec<u8>, String)> = sqlx::query_as(
         "SELECT i.media_data, COALESCE(i.media_mime_type, 'application/octet-stream') \
          FROM invoices i \
@@ -91,8 +79,7 @@ pub async fn get_invoice_media(
         Some((data, mime_type)) => (
             [(header::CONTENT_TYPE, mime_type)],
             Body::from(data),
-        )
-            .into_response(),
+        ).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }

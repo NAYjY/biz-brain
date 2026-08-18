@@ -1,7 +1,14 @@
 //! Worker management endpoints.
-use axum::{extract::State, http::StatusCode, Json};
+//! Uses typed Path<(Uuid, Uuid)> for sub-resource routes.
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
 use crate::{extractors::AuthorizedBranch, state::AppState};
 
 #[derive(Debug, Serialize)]
@@ -23,7 +30,11 @@ pub async fn list_workers(
          LEFT JOIN actor_directory ad \
            ON ad.actor_id = w.id AND ad.actor_type = 'worker' AND ad.owner_confirmed = TRUE \
          WHERE w.branch_id = $1 ORDER BY w.name ASC",
-    ).bind(branch_id).fetch_all(&state.pool).await.map_err(internal)?;
+    )
+    .bind(branch_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal)?;
 
     Ok(Json(rows.into_iter().map(|(id, name, channel, external_id)| WorkerView {
         id, name, bound: channel.is_some(), channel, external_id,
@@ -48,35 +59,44 @@ pub async fn create_worker(
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO workers (id, branch_id, name) VALUES ($1, $2, $3)")
         .bind(id).bind(branch_id).bind(&name)
-        .execute(&state.pool).await.map_err(internal)?;
+        .execute(&state.pool)
+        .await
+        .map_err(internal)?;
     Ok((StatusCode::CREATED, Json(CreateWorkerResponse { id, name })))
 }
 
+/// DELETE /branches/:branch_id/workers/:worker_id
+/// Typed Path<(Uuid, Uuid)> avoids double-Path extraction.
 pub async fn delete_worker(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    axum::extract::Path(params): axum::extract::Path<std::collections::HashMap<String, String>>,
+    Path((_branch_id, worker_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let worker_id = params.get("worker_id")
-        .ok_or((StatusCode::BAD_REQUEST, "missing worker_id".to_string()))?
-        .parse::<Uuid>()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid worker_id".to_string()))?;
-
     let (active,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*)::bigint FROM order_current_state \
          WHERE worker_id = $1 AND state NOT IN ('done','cancelled','unavailable')",
-    ).bind(worker_id).fetch_one(&state.pool).await.map_err(internal)?;
+    )
+    .bind(worker_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal)?;
 
     if active > 0 {
         return Err((StatusCode::CONFLICT, format!("Worker has {active} active order(s)")));
     }
 
     sqlx::query("DELETE FROM actor_directory WHERE actor_id = $1 AND actor_type = 'worker'")
-        .bind(worker_id).execute(&state.pool).await.map_err(internal)?;
+        .bind(worker_id)
+        .execute(&state.pool)
+        .await
+        .map_err(internal)?;
 
     let result = sqlx::query("DELETE FROM workers WHERE id = $1 AND branch_id = $2")
-        .bind(worker_id).bind(branch_id)
-        .execute(&state.pool).await.map_err(internal)?;
+        .bind(worker_id)
+        .bind(branch_id)
+        .execute(&state.pool)
+        .await
+        .map_err(internal)?;
 
     if result.rows_affected() == 0 {
         return Err((StatusCode::NOT_FOUND, "worker not found".to_string()));

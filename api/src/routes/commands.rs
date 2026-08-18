@@ -1,11 +1,13 @@
 //! T05 / P04: one command endpoint per `DomainEvent` variant the Owner can
-//! trigger directly. After storing each event, calls event_handler::fan_out
-//! so Workers/Suppliers receive their LINE/WhatsApp/Telegram push.
+//! trigger directly.
 //!
-//! P04: three new endpoints —
-//!   POST /orders/:id/cancel         → OwnerCancelled
-//!   POST /orders/:id/reset          → OrderReset
-//!   POST /orders/:id/resolve-clarification → ClarificationResolved
+//! KEY DESIGN: every route that lives under
+//!   /branches/:branch_id/orders/:order_id/...
+//! uses a *typed* `Path<(Uuid, Uuid)>` to extract both ids at once.
+//! `AuthorizedBranch` internally extracts `Path<HashMap<String,String>>`
+//! for the branch ownership check — combining it with a *second* Path
+//! extractor of a *different* type is fine because Axum de-duplicates by
+//! type, but we must not use `Path<HashMap>` twice.
 
 use axum::{
     extract::{Path, State},
@@ -23,17 +25,9 @@ use crate::{event_handler, extractors::AuthorizedBranch, state::AppState};
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
-
 fn bad_request(msg: impl Into<String>) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, msg.into())
 }
-
-
-#[derive(Deserialize)]
-pub struct OrderPath {
-    pub order_id: Uuid,
-}
-
 
 // ── Assign Worker ─────────────────────────────────────────────────────────── //
 
@@ -42,10 +36,10 @@ pub struct AssignWorkerRequest {
     pub worker_id: Uuid,
 }
 
-/// `POST /branches/:branch_id/orders/:order_id/assign-worker`
+/// POST /branches/:branch_id/orders/:order_id/assign-worker
 pub async fn assign_worker(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(OrderPath { order_id }): Path<OrderPath>,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
     Json(req): Json<AssignWorkerRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -60,12 +54,11 @@ pub async fn assign_worker(
 
     if binding.is_none() {
         return Err(bad_request(
-            "This worker has no confirmed channel binding. \
-             Go to Workers & Suppliers to confirm their binding first.",
+            "Worker has no confirmed channel binding. \
+             Confirm it on the Workers & Suppliers page first.",
         ));
     }
 
-     
     let event = DomainEvent::WorkerAssigned {
         worker_id: WorkerId::new(req.worker_id),
         order_id: OrderId::new(order_id),
@@ -75,66 +68,54 @@ pub async fn assign_worker(
 
 // ── Close Order ───────────────────────────────────────────────────────────── //
 
-/// `POST /branches/:branch_id/orders/:order_id/close`
-#[axum::debug_handler]
+/// POST /branches/:branch_id/orders/:order_id/close
 pub async fn close_order(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(OrderPath { order_id }): Path<OrderPath>,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-      
     let event = DomainEvent::OrderDone { order_id: OrderId::new(order_id) };
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
-// ── P04: Cancel Order (OwnerCancelled) ───────────────────────────────────── //
+// ── P04: Cancel Order ─────────────────────────────────────────────────────── //
 
-/// `POST /branches/:branch_id/orders/:order_id/cancel`
-/// Owner explicitly cancels an order from any non-Done state.
-/// Pushes a notification to the assigned Worker if one exists.
+/// POST /branches/:branch_id/orders/:order_id/cancel
 pub async fn cancel_order(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(OrderPath { order_id }): Path<OrderPath>,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-      
     let event = DomainEvent::OwnerCancelled { order_id: OrderId::new(order_id) };
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
-// ── P04: Reset Order (OrderReset) ────────────────────────────────────────── //
+// ── P04: Reset Order ──────────────────────────────────────────────────────── //
 
-/// `POST /branches/:branch_id/orders/:order_id/reset`
-/// Owner resets a Cancelled or Unavailable order back to Unassigned.
+/// POST /branches/:branch_id/orders/:order_id/reset
 pub async fn reset_order(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(OrderPath { order_id }): Path<OrderPath>,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-      
     let event = DomainEvent::OrderReset { order_id: OrderId::new(order_id) };
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
-// ── P04: Resolve Clarification (ClarificationResolved) ───────────────────── //
+// ── P04: Resolve Clarification ────────────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]
 pub struct ResolveClarificationRequest {
-    /// Message text sent back to the Worker.
     pub message: String,
 }
 
-/// `POST /branches/:branch_id/orders/:order_id/resolve-clarification`
-/// Owner resolves a Worker's clarification, sending a message and re-assigning.
+/// POST /branches/:branch_id/orders/:order_id/resolve-clarification
 pub async fn resolve_clarification(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(OrderPath { order_id }): Path<OrderPath>,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
     Json(req): Json<ResolveClarificationRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-      
-
-    // Look up the assigned worker_id from the projection.
     let row: Option<(Option<Uuid>,)> = sqlx::query_as(
         "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
     )
@@ -148,7 +129,6 @@ pub async fn resolve_clarification(
         .and_then(|(id,)| id)
         .ok_or_else(|| bad_request("no worker assigned to this order"))?;
 
-    // Send the Owner's reply message to the Worker first.
     send_message_to_worker(&state, worker_id, &req.message)
         .await
         .map_err(internal)?;
@@ -167,10 +147,10 @@ pub struct ApproveInvoiceRequest {
     pub invoice_id: Uuid,
 }
 
-/// `POST /branches/:branch_id/supply-requests/:supply_request_id/approve-invoice`
+/// POST /branches/:branch_id/supply-requests/:supply_request_id/approve-invoice
 pub async fn approve_invoice(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(supply_request_id): Path<Uuid>,
+    Path((_branch_id, supply_request_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
     Json(req): Json<ApproveInvoiceRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -205,22 +185,20 @@ pub async fn approve_invoice(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── Message Worker (Owner → Worker free text) ─────────────────────────────── //
+// ── Message Worker ────────────────────────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]
 pub struct MessageWorkerRequest {
     pub text: String,
 }
 
-/// `POST /branches/:branch_id/orders/:order_id/message-worker`
+/// POST /branches/:branch_id/orders/:order_id/message-worker
 pub async fn message_worker(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(OrderPath { order_id }): Path<OrderPath>,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
     Json(req): Json<MessageWorkerRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-      
-
     let text = req.text.trim().to_string();
     if text.is_empty() {
         return Err(bad_request("message text required"));
@@ -253,7 +231,7 @@ async fn send_message_to_worker(
     worker_id: Uuid,
     text: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let identity_row: Option<(String, String)> = sqlx::query_as(
+    let row: Option<(String, String)> = sqlx::query_as(
         "SELECT channel, external_id FROM actor_directory \
          WHERE actor_id = $1 AND actor_type = 'worker' AND owner_confirmed = TRUE",
     )
@@ -261,8 +239,8 @@ async fn send_message_to_worker(
     .fetch_optional(&state.pool)
     .await?;
 
-    let (channel_str, external_id) = identity_row
-        .ok_or("worker has no confirmed channel binding")?;
+    let (channel_str, external_id) =
+        row.ok_or("worker has no confirmed channel binding")?;
 
     let channel = parse_channel(&channel_str)?;
     let identity = ChannelIdentity { channel, external_id };
@@ -303,17 +281,6 @@ async fn append_and_project_order(
     state.publish_sse(signal).await;
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn path_uuid(
-    params: &std::collections::HashMap<String, String>,
-    key: &str,
-) -> Result<Uuid, (StatusCode, String)> {
-    params
-        .get(key)
-        .ok_or_else(|| bad_request(format!("missing {key} in path")))?
-        .parse()
-        .map_err(|_| bad_request(format!("{key} is not a valid UUID")))
 }
 
 fn parse_channel(s: &str) -> Result<Channel, Box<dyn std::error::Error>> {

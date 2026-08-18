@@ -1,21 +1,13 @@
 //! EventHandler fan-out — fires push notifications after each DomainEvent.
 //!
-//! P04: OwnerCancelled pushes a cancellation notice to the Worker;
-//! ClarificationResolved pushes confirmation back to the Worker.
-//! OrderReset has no outbound push (no Worker assigned at reset time).
-//!
-//! Notification matrix:
-//!   WorkerAssigned           → LINE/Telegram push to Worker
-//!   OwnerCancelled           → push to Worker (if assigned)
-//!   ClarificationResolved    → push to Worker: "Owner has responded"
-//!   SupplyRequestSent        → WhatsApp push to all Suppliers in Branch
-//!   InvoiceApproved          → WhatsApp push to Supplier
-//!   All others               → SSE-only (dashboard auto-refreshes)
+//! P04: OwnerCancelled pushes a cancellation notice to the Worker (if any);
+//! ClarificationResolved pushes Owner's reply back to the Worker.
+//! OrderReset has no outbound push.
 //!
 //! Errors are logged but never propagate — a failed push must not roll back
 //! the event that already landed in the store.
 
-use domain::{BranchId, Channel, ChannelIdentity, DomainEvent};
+use domain::{Channel, ChannelIdentity, DomainEvent};
 use messaging::ChannelAdapter;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -33,8 +25,6 @@ async fn try_fan_out(
     event: &DomainEvent,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match event {
-        // ── Worker receives a push ───────────────────────────────────── //
-
         DomainEvent::WorkerAssigned { worker_id, order_id } => {
             let desc = order_description(&state.pool, order_id.into_inner()).await?;
             let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
@@ -45,38 +35,31 @@ async fn try_fan_out(
             send_to_identity(state, &identity, &text).await;
         }
 
-        // P04: Owner cancelled — notify the assigned Worker if any.
+        // P04: notify the assigned Worker if there is one — best-effort only,
+        // so we use .await.ok() instead of ? to avoid failing the whole fan-out
+        // when the order simply has no Worker yet.
         DomainEvent::OwnerCancelled { order_id } => {
-    let desc = order_description(&state.pool, order_id.into_inner()).await?;
-    
-    // Convert to Option and drop the Err variant before the next .await
-    let identity = assigned_worker_identity(&state.pool, order_id.into_inner())
-        .await
-        .ok();
+            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            if let Some(identity) = assigned_worker_identity(&state.pool, order_id.into_inner()).await {
+                let text = format!("❌ Order cancelled by Owner: {desc}");
+                send_to_identity(state, &identity, &text).await;
+            }
+        }
 
-    if let Some(identity) = identity {
-        let text = format!("❌ Order cancelled by Owner: {desc}");
-        send_to_identity(state, &identity, &text).await;
-    }
-}
-
-        // P04: Clarification resolved — push the Owner's reply back to Worker.
+        // P04: clarification resolved — push Owner's reply to the Worker.
         DomainEvent::ClarificationResolved { worker_id, order_id } => {
             let desc = order_description(&state.pool, order_id.into_inner()).await?;
             let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
             let text = format!(
-                "✅ Owner has responded to your question about: {desc}\n\
+                "✅ Owner has responded about: {desc}\n\
                  Order is back to Assigned. Please proceed."
             );
             send_to_identity(state, &identity, &text).await;
         }
 
-        // ── Supplier receives a push ─────────────────────────────────── //
-
         DomainEvent::SupplyRequestSent { supply_request_id, branch_id } => {
             let desc = supply_request_description(&state.pool, supply_request_id.into_inner()).await?;
-            let identities =
-                supplier_identities_for_branch(&state.pool, branch_id.into_inner()).await?;
+            let identities = supplier_identities_for_branch(&state.pool, branch_id.into_inner()).await?;
             let text = format!(
                 "📦 New supply request: {desc}\n\
                  Please reply with your invoice / price list."
@@ -87,14 +70,13 @@ async fn try_fan_out(
         }
 
         DomainEvent::InvoiceApproved { invoice_id, .. } => {
-            let identity =
-                supplier_identity_for_invoice(&state.pool, invoice_id.into_inner()).await?;
+            let identity = supplier_identity_for_invoice(&state.pool, invoice_id.into_inner()).await?;
             let text = "✅ Your invoice has been approved. \
                         Please reply 'ยืนยัน' (confirm) to proceed.";
             send_to_identity(state, &identity, text).await;
         }
 
-        // ── All others: SSE handles dashboard refresh ────────────────── //
+        // All others: SSE handles the dashboard refresh, no push needed.
         _ => {}
     }
 
@@ -114,7 +96,7 @@ async fn send_to_identity(state: &AppState, identity: &ChannelIdentity, text: &s
     }
 }
 
-// ── DB helpers ────────────────────────────────────────────────────────────── //
+// ── DB helpers ───────────────────────────────────────────────────────────── //
 
 async fn order_description(pool: &PgPool, order_id: Uuid) -> Result<String, sqlx::Error> {
     let (desc,): (String,) =
@@ -152,22 +134,22 @@ async fn worker_identity(
     Ok(ChannelIdentity { channel: parse_channel(&channel_str)?, external_id })
 }
 
-/// P04: get the currently assigned Worker's identity, if any.
-async fn assigned_worker_identity(
-    pool: &PgPool,
-    order_id: Uuid,
-) -> Result<ChannelIdentity, Box<dyn std::error::Error>> {
+/// P04: returns `Some(identity)` for the assigned Worker, `None` if none assigned
+/// or the lookup fails. Intentionally infallible so OwnerCancelled never errors
+/// just because an order was never assigned.
+async fn assigned_worker_identity(pool: &PgPool, order_id: Uuid) -> Option<ChannelIdentity> {
     let row: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND worker_id IS NOT NULL",
+        "SELECT worker_id FROM order_current_state \
+         WHERE order_id = $1 AND worker_id IS NOT NULL",
     )
     .bind(order_id)
     .fetch_optional(pool)
-    .await?;
+    .await
+    .ok()
+    .flatten();
 
-    let (worker_id,) =
-        row.ok_or_else(|| format!("no worker assigned to order {order_id}"))?;
-
-    worker_identity(pool, worker_id).await
+    let (worker_id,) = row?;
+    worker_identity(pool, worker_id).await.ok()
 }
 
 async fn supplier_identity_for_invoice(
@@ -188,7 +170,7 @@ async fn supplier_identity_for_invoice(
     .await?;
 
     let (channel_str, external_id) =
-        row.ok_or_else(|| format!("no confirmed binding for invoice {invoice_id}'s supplier"))?;
+        row.ok_or_else(|| format!("no supplier binding for invoice {invoice_id}"))?;
 
     Ok(ChannelIdentity { channel: parse_channel(&channel_str)?, external_id })
 }
@@ -211,9 +193,7 @@ async fn supplier_identities_for_branch(
     .await?;
 
     rows.into_iter()
-        .map(|(ch, ext)| {
-            Ok(ChannelIdentity { channel: parse_channel(&ch)?, external_id: ext })
-        })
+        .map(|(ch, ext)| Ok(ChannelIdentity { channel: parse_channel(&ch)?, external_id: ext }))
         .collect()
 }
 
