@@ -47,13 +47,18 @@ async fn try_fan_out(
 
         // P04: Owner cancelled — notify the assigned Worker if any.
         DomainEvent::OwnerCancelled { order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
-            if let Ok(identity) = assigned_worker_identity(&state.pool, order_id.into_inner()).await {
-                let text = format!("❌ Order cancelled by Owner: {desc}");
-                send_to_identity(state, &identity, &text).await;
-            }
-            // No Worker assigned → no push needed.
-        }
+    let desc = order_description(&state.pool, order_id.into_inner()).await?;
+    
+    // Convert to Option and drop the Err variant before the next .await
+    let identity = assigned_worker_identity(&state.pool, order_id.into_inner())
+        .await
+        .ok();
+
+    if let Some(identity) = identity {
+        let text = format!("❌ Order cancelled by Owner: {desc}");
+        send_to_identity(state, &identity, &text).await;
+    }
+}
 
         // P04: Clarification resolved — push the Owner's reply back to Worker.
         DomainEvent::ClarificationResolved { worker_id, order_id } => {

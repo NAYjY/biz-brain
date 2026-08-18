@@ -63,13 +63,9 @@ pub async fn create_supply_request(
 /// D08-4: POST /supply-requests/:id/send — Owner dispatches Draft SR to Supplier.
 pub async fn send_supply_request(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(params): Path<std::collections::HashMap<String, String>>,
+    Path(supply_request_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let supply_request_id = params.get("supply_request_id")
-        .ok_or((StatusCode::BAD_REQUEST, "missing supply_request_id".to_string()))?
-        .parse::<Uuid>()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid supply_request_id".to_string()))?;
 
     let supply_request_id = SupplyRequestId::new(supply_request_id);
     let branch_id_typed = BranchId::new(branch_id);

@@ -28,6 +28,13 @@ fn bad_request(msg: impl Into<String>) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, msg.into())
 }
 
+
+#[derive(Deserialize)]
+pub struct OrderPath {
+    pub order_id: Uuid,
+}
+
+
 // ── Assign Worker ─────────────────────────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]
@@ -38,7 +45,7 @@ pub struct AssignWorkerRequest {
 /// `POST /branches/:branch_id/orders/:order_id/assign-worker`
 pub async fn assign_worker(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(params): Path<std::collections::HashMap<String, String>>,
+    Path(OrderPath { order_id }): Path<OrderPath>,
     State(state): State<AppState>,
     Json(req): Json<AssignWorkerRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -58,7 +65,7 @@ pub async fn assign_worker(
         ));
     }
 
-    let order_id = path_uuid(&params, "order_id")?;
+     
     let event = DomainEvent::WorkerAssigned {
         worker_id: WorkerId::new(req.worker_id),
         order_id: OrderId::new(order_id),
@@ -69,12 +76,13 @@ pub async fn assign_worker(
 // ── Close Order ───────────────────────────────────────────────────────────── //
 
 /// `POST /branches/:branch_id/orders/:order_id/close`
+#[axum::debug_handler]
 pub async fn close_order(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(params): Path<std::collections::HashMap<String, String>>,
+    Path(OrderPath { order_id }): Path<OrderPath>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let order_id = path_uuid(&params, "order_id")?;
+      
     let event = DomainEvent::OrderDone { order_id: OrderId::new(order_id) };
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
@@ -86,10 +94,10 @@ pub async fn close_order(
 /// Pushes a notification to the assigned Worker if one exists.
 pub async fn cancel_order(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(params): Path<std::collections::HashMap<String, String>>,
+    Path(OrderPath { order_id }): Path<OrderPath>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let order_id = path_uuid(&params, "order_id")?;
+      
     let event = DomainEvent::OwnerCancelled { order_id: OrderId::new(order_id) };
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
@@ -100,10 +108,10 @@ pub async fn cancel_order(
 /// Owner resets a Cancelled or Unavailable order back to Unassigned.
 pub async fn reset_order(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(params): Path<std::collections::HashMap<String, String>>,
+    Path(OrderPath { order_id }): Path<OrderPath>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let order_id = path_uuid(&params, "order_id")?;
+      
     let event = DomainEvent::OrderReset { order_id: OrderId::new(order_id) };
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
@@ -120,11 +128,11 @@ pub struct ResolveClarificationRequest {
 /// Owner resolves a Worker's clarification, sending a message and re-assigning.
 pub async fn resolve_clarification(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(params): Path<std::collections::HashMap<String, String>>,
+    Path(OrderPath { order_id }): Path<OrderPath>,
     State(state): State<AppState>,
     Json(req): Json<ResolveClarificationRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let order_id = path_uuid(&params, "order_id")?;
+      
 
     // Look up the assigned worker_id from the projection.
     let row: Option<(Option<Uuid>,)> = sqlx::query_as(
@@ -162,11 +170,10 @@ pub struct ApproveInvoiceRequest {
 /// `POST /branches/:branch_id/supply-requests/:supply_request_id/approve-invoice`
 pub async fn approve_invoice(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(params): Path<std::collections::HashMap<String, String>>,
+    Path(supply_request_id): Path<Uuid>,
     State(state): State<AppState>,
     Json(req): Json<ApproveInvoiceRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let supply_request_id = path_uuid(&params, "supply_request_id")?;
     let supply_request_id = domain::SupplyRequestId::new(supply_request_id);
 
     let event = DomainEvent::InvoiceApproved {
@@ -208,11 +215,11 @@ pub struct MessageWorkerRequest {
 /// `POST /branches/:branch_id/orders/:order_id/message-worker`
 pub async fn message_worker(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(params): Path<std::collections::HashMap<String, String>>,
+    Path(OrderPath { order_id }): Path<OrderPath>,
     State(state): State<AppState>,
     Json(req): Json<MessageWorkerRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let order_id = path_uuid(&params, "order_id")?;
+      
 
     let text = req.text.trim().to_string();
     if text.is_empty() {

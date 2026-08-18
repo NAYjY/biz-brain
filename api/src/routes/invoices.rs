@@ -69,16 +69,9 @@ pub async fn list_invoices(
 /// The Owner opens this URL in the dashboard modal to view the image/PDF.
 pub async fn get_invoice_media(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path(params): Path<std::collections::HashMap<String, String>>,
+    Path(invoice_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Response {
-    let invoice_id = match params
-        .get("invoice_id")
-        .and_then(|id| id.parse::<Uuid>().ok())
-    {
-        Some(id) => id,
-        None => return StatusCode::BAD_REQUEST.into_response(),
-    };
 
     // Verify the invoice belongs to this Branch.
     let row: Option<(Vec<u8>, String)> = sqlx::query_as(
