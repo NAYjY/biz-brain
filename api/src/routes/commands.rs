@@ -259,75 +259,99 @@ pub struct EditDescriptionRequest {
 
 /// PATCH /branches/:branch_id/orders/:order_id/description
 /// Edit order description — logged to order_description_edits; not an event.
+/// Worker is notified with both the old and new description text.
 pub async fn edit_description(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
     Json(req): Json<EditDescriptionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let desc = req.description.trim().to_string();
-    if desc.is_empty() {
+    let new_desc = req.description.trim().to_string();
+    if new_desc.is_empty() {
         return Err(bad_request("description cannot be empty"));
     }
-    if desc.len() > 1000 {
+    if new_desc.len() > 1000 {
         return Err(bad_request("description max 1000 characters"));
     }
-
-    // Verify order belongs to this branch.
-    let exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM orders WHERE id = $1 AND branch_id = $2 AND deleted_at IS NULL",
+ 
+    // Verify order belongs to this branch and fetch current description.
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT COALESCE( \
+            (SELECT new_description FROM order_description_edits \
+             WHERE order_id = $1 ORDER BY id DESC LIMIT 1), \
+            o.description \
+         ) \
+         FROM orders o \
+         WHERE o.id = $1 AND o.branch_id = $2 AND o.deleted_at IS NULL",
     )
-    .bind(order_id).bind(branch_id)
-    .fetch_optional(&state.pool).await.map_err(internal)?;
-
-    if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, "order not found".to_string()));
-    }
-
+    .bind(order_id)
+    .bind(branch_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+ 
+    let old_desc = match row {
+        Some((d,)) => d,
+        None => return Err((StatusCode::NOT_FOUND, "order not found".to_string())),
+    };
+ 
+    // Log the edit.
     sqlx::query(
         "INSERT INTO order_description_edits (order_id, new_description) VALUES ($1, $2)",
     )
-    .bind(order_id).bind(&desc)
-    .execute(&state.pool).await.map_err(internal)?;
-
-    // Update projection immediately (no event stream — description is metadata).
+    .bind(order_id)
+    .bind(&new_desc)
+    .execute(&state.pool)
+    .await
+    .map_err(internal)?;
+ 
+    // Update projection immediately.
     sqlx::query(
-        "UPDATE order_current_state SET description = $1, updated_at = NOW() \
-         WHERE order_id = $2",
+        "UPDATE order_current_state SET description = $1, updated_at = NOW() WHERE order_id = $2",
     )
-    .bind(&desc).bind(order_id)
-    .execute(&state.pool).await.map_err(internal)?;
-
-    // Publish SSE so the dashboard refreshes.
-    let meta: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT branch_id FROM orders WHERE id = $1",
-    )
-    .bind(order_id).fetch_optional(&state.pool).await.map_err(internal)?;
-
-    if let Some((bid,)) = meta {
-        state.publish_sse(domain::SseSignal::OrderChanged {
-            order_id: domain::OrderId::new(order_id),
-            branch_id: domain::BranchId::new(bid),
-        }).await;
-    }
-
-    // Notify worker if one is assigned
-    if let Ok(Some((worker_id,))) = sqlx::query_as::<_, (Option<Uuid>,)>(
+    .bind(&new_desc)
+    .bind(order_id)
+    .execute(&state.pool)
+    .await
+    .map_err(internal)?;
+ 
+    // Notify assigned worker with before → after context.
+    let worker_row: Option<(Option<Uuid>,)> = sqlx::query_as(
         "SELECT worker_id FROM order_current_state WHERE order_id = $1",
     )
     .bind(order_id)
     .fetch_optional(&state.pool)
     .await
-    {
-        if let Some(wid) = worker_id {
-            let _ = send_message_to_worker(&state, wid, 
-                &format!("ℹ️ Order description updated: {desc}")).await;
-        }
+    .map_err(internal)?;
+ 
+    if let Some((Some(worker_id),)) = worker_row {
+        let msg = format!(
+            "ℹ️ Order description updated by Owner.\n\
+             Before: {old_desc}\n\
+             After:  {new_desc}"
+        );
+        let _ = send_message_to_worker(&state, worker_id, &msg).await;
     }
-
+ 
+    // Publish SSE so the dashboard refreshes.
+    let meta: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(internal)?;
+ 
+    if let Some((bid,)) = meta {
+        state
+            .publish_sse(domain::SseSignal::OrderChanged {
+                order_id: domain::OrderId::new(order_id),
+                branch_id: domain::BranchId::new(bid),
+            })
+            .await;
+    }
+ 
     Ok(StatusCode::NO_CONTENT)
 }
-
 // ── P16: Delete order (soft) ──────────────────────────────────────────────── //
 
 /// DELETE /branches/:branch_id/orders/:order_id
