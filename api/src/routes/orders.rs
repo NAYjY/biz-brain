@@ -1,5 +1,6 @@
-//! GET reads from T02's projection table (P16: filters soft-deleted orders).
-//! POST creates the Order directly (Order creation is not a DomainEvent).
+//! GET reads from T02's projection table.
+//! POST creates the Order directly.
+//! P16: list_orders filters soft-deleted orders via JOIN.
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -20,26 +21,29 @@ pub async fn list_orders(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<OrderView>>, (StatusCode, String)> {
-    // P16: JOIN with orders table to exclude soft-deleted rows.
-    let rows: Vec<(Uuid, Uuid, String, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as(
-            "SELECT ocs.order_id, ocs.customer_id, \
-                    COALESCE(ocs.description, o.description), ocs.state, \
-                    ocs.worker_id, ocs.last_worker_message, ocs.last_worker_message_at \
-             FROM order_current_state ocs \
-             JOIN orders o ON o.id = ocs.order_id \
-             WHERE ocs.branch_id = $1 \
-               AND o.deleted_at IS NULL \
-             ORDER BY ocs.updated_at DESC",
-        )
-        .bind(branch_id)
-        .fetch_all(&state.pool)
-        .await
-        .map_err(internal)?;
+    let rows = state.projections.orders_by_branch(branch_id).await.map_err(internal)?;
 
-    Ok(Json(rows.into_iter().map(|(id, customer_id, description, st, worker_id, lwm, lwma)| {
-        OrderView { id, customer_id, description, state: st, worker_id, last_worker_message: lwm, last_worker_message_at: lwma }
-    }).collect()))
+    // P16: filter out soft-deleted orders
+    let active_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM orders WHERE branch_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(branch_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal)?;
+
+    Ok(Json(rows.into_iter()
+        .filter(|r| active_ids.contains(&r.id))
+        .map(|r| OrderView {
+            id: r.id,
+            customer_id: r.customer_id,
+            description: r.description,
+            state: r.state,
+            worker_id: r.worker_id,
+            last_worker_message: r.last_worker_message,
+            last_worker_message_at: r.last_worker_message_at,
+        })
+        .collect()))
 }
 
 #[derive(Debug, Deserialize)]

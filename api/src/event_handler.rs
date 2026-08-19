@@ -53,35 +53,19 @@ async fn try_fan_out(
         // P16: notify Worker they've been marked unavailable by Owner.
         DomainEvent::OwnerForceUnavailable { worker_id, order_id } => {
             let desc = order_description(&state.pool, order_id.into_inner()).await?;
-            if let Ok(identity) = worker_identity(&state.pool, worker_id.into_inner()).await {
-                let text = format!("ℹ️ Owner has marked you as unavailable for: {desc}");
-                send_to_identity(state, &identity, &text).await;
-            }
+            let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
+            let text = format!("ℹ️ Owner has marked you as unavailable for: {desc}");
+            send_to_identity(state, &identity, &text).await;
         }
 
-        // P16: notify new Worker of assignment; old worker gets a removal notice.
         DomainEvent::OwnerReassignWorker { new_worker_id, order_id } => {
             let desc = order_description(&state.pool, order_id.into_inner()).await?;
-
-            // Notify new worker.
-            if let Ok(identity) = worker_identity(&state.pool, new_worker_id.into_inner()).await {
-                let text = format!(
-                    "📋 You have been reassigned to: {desc}\n\
-                     Reply 'รับงาน' (accept) or 'ไม่ว่าง' (unavailable)."
-                );
-                send_to_identity(state, &identity, &text).await;
-            }
-
-            // Notify old worker if there was one (best-effort).
-            if let Some(old_identity) = assigned_worker_identity(&state.pool, order_id.into_inner()).await {
-                if old_identity.external_id !=
-                    worker_identity(&state.pool, new_worker_id.into_inner())
-                        .await.map(|i| i.external_id).unwrap_or_default()
-                {
-                    let text = format!("ℹ️ You have been reassigned away from: {desc}");
-                    send_to_identity(state, &old_identity, &text).await;
-                }
-            }
+            let identity = worker_identity(&state.pool, new_worker_id.into_inner()).await?;
+            let text = format!(
+                "📋 You have been reassigned to: {desc}\n\
+                Reply 'รับงาน' (accept) or 'ไม่ว่าง' (unavailable)."
+            );
+            send_to_identity(state, &identity, &text).await;
         }
 
         DomainEvent::SupplyRequestSent { supply_request_id, branch_id } => {
