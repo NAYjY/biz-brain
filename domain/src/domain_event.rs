@@ -4,6 +4,9 @@
 //!
 //! P04/P15: three new Owner-command events added —
 //!   OwnerCancelled, OrderReset, ClarificationResolved.
+//! P16: five new Owner force-state events —
+//!   OwnerForceAccepted, OwnerForceUnavailable, OwnerForceClarification,
+//!   OwnerForceReady, OwnerReassignWorker.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,12 +25,21 @@ pub enum DomainEvent {
     OrderDone { order_id: OrderId },
 
     // P04: Owner-dashboard command events (never Agent-originated).
-    /// Owner explicitly cancels any non-Done order.
     OwnerCancelled { order_id: OrderId },
-    /// Owner resets a Cancelled or Unavailable order back to Unassigned.
     OrderReset { order_id: OrderId },
-    /// Owner resolves a worker's clarification request (re-assigns to Accepted).
     ClarificationResolved { worker_id: WorkerId, order_id: OrderId },
+
+    // P16: Owner full-control force-state events.
+    /// Owner forces Accepted (Worker verbally confirmed, no message needed).
+    OwnerForceAccepted { order_id: OrderId },
+    /// Owner marks Worker as unavailable for this order.
+    OwnerForceUnavailable { worker_id: WorkerId, order_id: OrderId },
+    /// Owner manually opens a clarification request.
+    OwnerForceClarification { order_id: OrderId },
+    /// Owner marks the order as ready for pickup.
+    OwnerForceReady { order_id: OrderId },
+    /// Owner swaps the assigned Worker (no cancel+reset cycle required).
+    OwnerReassignWorker { new_worker_id: WorkerId, order_id: OrderId },
 
     // ── Supplier / SupplyRequest events ──────────────────────────── //
     SupplyRequestSent { supply_request_id: SupplyRequestId, branch_id: BranchId },
@@ -39,24 +51,28 @@ pub enum DomainEvent {
 impl DomainEvent {
     pub fn variant(&self) -> DomainEventVariant {
         match self {
-            Self::WorkerAssigned { .. }        => DomainEventVariant::WorkerAssigned,
-            Self::WorkerAccepted { .. }        => DomainEventVariant::WorkerAccepted,
-            Self::WorkerUnavailable { .. }     => DomainEventVariant::WorkerUnavailable,
-            Self::WorkerCancelled { .. }       => DomainEventVariant::WorkerCancelled,
-            Self::ClarificationRequested { .. }=> DomainEventVariant::ClarificationRequested,
-            Self::WorkerReadyForPickup { .. }  => DomainEventVariant::WorkerReadyForPickup,
-            Self::OrderDone { .. }             => DomainEventVariant::OrderDone,
-            Self::OwnerCancelled { .. }        => DomainEventVariant::OwnerCancelled,
-            Self::OrderReset { .. }            => DomainEventVariant::OrderReset,
-            Self::ClarificationResolved { .. } => DomainEventVariant::ClarificationResolved,
-            Self::SupplyRequestSent { .. }     => DomainEventVariant::SupplyRequestSent,
-            Self::InvoiceReceived { .. }       => DomainEventVariant::InvoiceReceived,
-            Self::InvoiceApproved { .. }       => DomainEventVariant::InvoiceApproved,
-            Self::SupplierConfirmed { .. }     => DomainEventVariant::SupplierConfirmed,
+            Self::WorkerAssigned { .. }          => DomainEventVariant::WorkerAssigned,
+            Self::WorkerAccepted { .. }          => DomainEventVariant::WorkerAccepted,
+            Self::WorkerUnavailable { .. }       => DomainEventVariant::WorkerUnavailable,
+            Self::WorkerCancelled { .. }         => DomainEventVariant::WorkerCancelled,
+            Self::ClarificationRequested { .. }  => DomainEventVariant::ClarificationRequested,
+            Self::WorkerReadyForPickup { .. }    => DomainEventVariant::WorkerReadyForPickup,
+            Self::OrderDone { .. }               => DomainEventVariant::OrderDone,
+            Self::OwnerCancelled { .. }          => DomainEventVariant::OwnerCancelled,
+            Self::OrderReset { .. }              => DomainEventVariant::OrderReset,
+            Self::ClarificationResolved { .. }   => DomainEventVariant::ClarificationResolved,
+            Self::OwnerForceAccepted { .. }      => DomainEventVariant::OwnerForceAccepted,
+            Self::OwnerForceUnavailable { .. }   => DomainEventVariant::OwnerForceUnavailable,
+            Self::OwnerForceClarification { .. } => DomainEventVariant::OwnerForceClarification,
+            Self::OwnerForceReady { .. }         => DomainEventVariant::OwnerForceReady,
+            Self::OwnerReassignWorker { .. }     => DomainEventVariant::OwnerReassignWorker,
+            Self::SupplyRequestSent { .. }       => DomainEventVariant::SupplyRequestSent,
+            Self::InvoiceReceived { .. }         => DomainEventVariant::InvoiceReceived,
+            Self::InvoiceApproved { .. }         => DomainEventVariant::InvoiceApproved,
+            Self::SupplierConfirmed { .. }       => DomainEventVariant::SupplierConfirmed,
         }
     }
 
-    /// The Order this event pertains to, if any (Order-aggregate events only).
     pub fn order_id(&self) -> Option<OrderId> {
         match self {
             Self::WorkerAssigned { order_id, .. }
@@ -68,12 +84,16 @@ impl DomainEvent {
             | Self::OrderDone { order_id }
             | Self::OwnerCancelled { order_id }
             | Self::OrderReset { order_id }
-            | Self::ClarificationResolved { order_id, .. } => Some(*order_id),
+            | Self::ClarificationResolved { order_id, .. }
+            | Self::OwnerForceAccepted { order_id }
+            | Self::OwnerForceClarification { order_id }
+            | Self::OwnerForceReady { order_id }
+            | Self::OwnerForceUnavailable { order_id, .. }
+            | Self::OwnerReassignWorker { order_id, .. } => Some(*order_id),
             _ => None,
         }
     }
 
-    /// The SupplyRequest this event pertains to, if any.
     pub fn supply_request_id(&self) -> Option<SupplyRequestId> {
         match self {
             Self::SupplyRequestSent { supply_request_id, .. }
@@ -83,8 +103,6 @@ impl DomainEvent {
         }
     }
 
-    /// Whether this event terminates a Worker's active assignment on the order.
-    /// Used by inbox_worker (P07) to remove the order from ThreadContextStore.
     pub fn is_terminal_for_worker(&self) -> bool {
         matches!(
             self,
@@ -92,6 +110,7 @@ impl DomainEvent {
                 | Self::WorkerUnavailable { .. }
                 | Self::WorkerCancelled { .. }
                 | Self::OwnerCancelled { .. }
+                | Self::OwnerForceUnavailable { .. }
         )
     }
 }
@@ -102,8 +121,6 @@ impl std::fmt::Display for DomainEvent {
     }
 }
 
-/// Discriminant-only view of `DomainEvent` — for CHECK-constrained `event_type`
-/// columns (store crate) and command-endpoint routing (api crate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DomainEventVariant {
     WorkerAssigned,
@@ -117,6 +134,12 @@ pub enum DomainEventVariant {
     OwnerCancelled,
     OrderReset,
     ClarificationResolved,
+    // P16
+    OwnerForceAccepted,
+    OwnerForceUnavailable,
+    OwnerForceClarification,
+    OwnerForceReady,
+    OwnerReassignWorker,
     // Supplier
     SupplyRequestSent,
     InvoiceReceived,
@@ -125,27 +148,30 @@ pub enum DomainEventVariant {
 }
 
 impl DomainEventVariant {
-    /// String form matching the SQL CHECK constraint values in store migrations.
     pub fn as_sql(&self) -> &'static str {
         match self {
-            Self::WorkerAssigned        => "worker_assigned",
-            Self::WorkerAccepted        => "worker_accepted",
-            Self::WorkerUnavailable     => "worker_unavailable",
-            Self::WorkerCancelled       => "worker_cancelled",
-            Self::ClarificationRequested=> "clarification_requested",
-            Self::WorkerReadyForPickup  => "worker_ready_for_pickup",
-            Self::OrderDone             => "order_done",
-            Self::OwnerCancelled        => "owner_cancelled",
-            Self::OrderReset            => "order_reset",
-            Self::ClarificationResolved => "clarification_resolved",
-            Self::SupplyRequestSent     => "supply_request_sent",
-            Self::InvoiceReceived       => "invoice_received",
-            Self::InvoiceApproved       => "invoice_approved",
-            Self::SupplierConfirmed     => "supplier_confirmed",
+            Self::WorkerAssigned         => "worker_assigned",
+            Self::WorkerAccepted         => "worker_accepted",
+            Self::WorkerUnavailable      => "worker_unavailable",
+            Self::WorkerCancelled        => "worker_cancelled",
+            Self::ClarificationRequested => "clarification_requested",
+            Self::WorkerReadyForPickup   => "worker_ready_for_pickup",
+            Self::OrderDone              => "order_done",
+            Self::OwnerCancelled         => "owner_cancelled",
+            Self::OrderReset             => "order_reset",
+            Self::ClarificationResolved  => "clarification_resolved",
+            Self::OwnerForceAccepted     => "owner_force_accepted",
+            Self::OwnerForceUnavailable  => "owner_force_unavailable",
+            Self::OwnerForceClarification=> "owner_force_clarification",
+            Self::OwnerForceReady        => "owner_force_ready",
+            Self::OwnerReassignWorker    => "owner_reassign_worker",
+            Self::SupplyRequestSent      => "supply_request_sent",
+            Self::InvoiceReceived        => "invoice_received",
+            Self::InvoiceApproved        => "invoice_approved",
+            Self::SupplierConfirmed      => "supplier_confirmed",
         }
     }
 
-    /// Which event table (T02: two separate tables) this variant belongs to.
     pub fn aggregate(&self) -> Aggregate {
         match self {
             Self::WorkerAssigned
@@ -157,7 +183,12 @@ impl DomainEventVariant {
             | Self::OrderDone
             | Self::OwnerCancelled
             | Self::OrderReset
-            | Self::ClarificationResolved => Aggregate::Order,
+            | Self::ClarificationResolved
+            | Self::OwnerForceAccepted
+            | Self::OwnerForceUnavailable
+            | Self::OwnerForceClarification
+            | Self::OwnerForceReady
+            | Self::OwnerReassignWorker => Aggregate::Order,
 
             Self::SupplyRequestSent
             | Self::InvoiceReceived

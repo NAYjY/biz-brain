@@ -1,5 +1,6 @@
 //! T02: read (replay) side of the order_events stream.
 //! P04/P15: extended with owner_cancelled, order_reset, clarification_resolved.
+//! P16: extended with owner_force_* and owner_reassign_worker.
 
 use domain::{DomainEvent, OrderId, WorkerId};
 use sqlx::{FromRow, PgPool};
@@ -42,7 +43,6 @@ impl OrderEventRepository {
         Ok(row.0.unwrap_or(0))
     }
 
-    /// Full replay ordered by sequence (T02: no snapshotting).
     pub async fn load_stream(&self, aggregate_id: OrderId) -> Result<Vec<DomainEvent>, ReadError> {
         let rows: Vec<OrderEventRow> = sqlx::query_as(
             "SELECT aggregate_id, sequence, event_type, worker_id \
@@ -58,7 +58,6 @@ impl OrderEventRepository {
     fn row_to_event(row: OrderEventRow) -> Result<DomainEvent, ReadError> {
         let order_id = OrderId::new(row.aggregate_id);
 
-        // Helper: require worker_id or return MissingColumn
         let require_worker = || {
             row.worker_id
                 .map(WorkerId::new)
@@ -69,17 +68,26 @@ impl OrderEventRepository {
         };
 
         Ok(match row.event_type.as_str() {
-            "worker_assigned"         => DomainEvent::WorkerAssigned { worker_id: require_worker()?, order_id },
-            "worker_accepted"         => DomainEvent::WorkerAccepted { worker_id: require_worker()?, order_id },
-            "worker_unavailable"      => DomainEvent::WorkerUnavailable { worker_id: require_worker()?, order_id },
-            "worker_cancelled"        => DomainEvent::WorkerCancelled { worker_id: require_worker()?, order_id },
-            "clarification_requested" => DomainEvent::ClarificationRequested { worker_id: require_worker()?, order_id },
-            "worker_ready_for_pickup" => DomainEvent::WorkerReadyForPickup { worker_id: require_worker()?, order_id },
-            "order_done"              => DomainEvent::OrderDone { order_id },
+            "worker_assigned"          => DomainEvent::WorkerAssigned { worker_id: require_worker()?, order_id },
+            "worker_accepted"          => DomainEvent::WorkerAccepted { worker_id: require_worker()?, order_id },
+            "worker_unavailable"       => DomainEvent::WorkerUnavailable { worker_id: require_worker()?, order_id },
+            "worker_cancelled"         => DomainEvent::WorkerCancelled { worker_id: require_worker()?, order_id },
+            "clarification_requested"  => DomainEvent::ClarificationRequested { worker_id: require_worker()?, order_id },
+            "worker_ready_for_pickup"  => DomainEvent::WorkerReadyForPickup { worker_id: require_worker()?, order_id },
+            "order_done"               => DomainEvent::OrderDone { order_id },
             // P04
-            "owner_cancelled"         => DomainEvent::OwnerCancelled { order_id },
-            "order_reset"             => DomainEvent::OrderReset { order_id },
-            "clarification_resolved"  => DomainEvent::ClarificationResolved { worker_id: require_worker()?, order_id },
+            "owner_cancelled"          => DomainEvent::OwnerCancelled { order_id },
+            "order_reset"              => DomainEvent::OrderReset { order_id },
+            "clarification_resolved"   => DomainEvent::ClarificationResolved { worker_id: require_worker()?, order_id },
+            // P16
+            "owner_force_accepted"     => DomainEvent::OwnerForceAccepted { order_id },
+            "owner_force_unavailable"  => DomainEvent::OwnerForceUnavailable { worker_id: require_worker()?, order_id },
+            "owner_force_clarification"=> DomainEvent::OwnerForceClarification { order_id },
+            "owner_force_ready"        => DomainEvent::OwnerForceReady { order_id },
+            "owner_reassign_worker"    => DomainEvent::OwnerReassignWorker {
+                new_worker_id: require_worker()?,
+                order_id,
+            },
             other => return Err(ReadError::UnknownEventType(other.to_string())),
         })
     }

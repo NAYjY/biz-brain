@@ -1,10 +1,8 @@
-//! T05 / P04: REST endpoints, webhooks, SSE.
-//! P04: cancel, reset, resolve-clarification endpoints added.
-//! P05: invoice media endpoint added.
-//! S05: security headers on every response.
+//! T05 / P04 / P16: REST endpoints, webhooks, SSE.
+//! P16: force-state, reassign, edit-description, delete-order endpoints added.
 
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use tower_http::trace::TraceLayer;
@@ -29,16 +27,22 @@ pub fn build_router() -> Router<AppState> {
         .route("/supply-requests/:supply_request_id/approve-invoice", post(routes::commands::approve_invoice))
         // Invoices
         .route("/invoices", get(routes::invoices::list_invoices))
-        // P05: invoice media download
         .route("/invoices/:invoice_id/media", get(routes::invoices::get_invoice_media))
-        // Order commands
-        .route("/orders/:order_id/assign-worker",          post(routes::commands::assign_worker))
-        .route("/orders/:order_id/close",                  post(routes::commands::close_order))
-        .route("/orders/:order_id/message-worker",         post(routes::commands::message_worker))
-        // P04: new Owner command endpoints
-        .route("/orders/:order_id/cancel",                 post(routes::commands::cancel_order))
-        .route("/orders/:order_id/reset",                  post(routes::commands::reset_order))
-        .route("/orders/:order_id/resolve-clarification",  post(routes::commands::resolve_clarification))
+        // Order commands — existing
+        .route("/orders/:order_id/assign-worker",         post(routes::commands::assign_worker))
+        .route("/orders/:order_id/close",                 post(routes::commands::close_order))
+        .route("/orders/:order_id/message-worker",        post(routes::commands::message_worker))
+        .route("/orders/:order_id/cancel",                post(routes::commands::cancel_order))
+        .route("/orders/:order_id/reset",                 post(routes::commands::reset_order))
+        .route("/orders/:order_id/resolve-clarification", post(routes::commands::resolve_clarification))
+        // Order commands — P16 new
+        .route("/orders/:order_id/force-accepted",        post(routes::commands::force_accepted))
+        .route("/orders/:order_id/force-unavailable",     post(routes::commands::force_unavailable))
+        .route("/orders/:order_id/force-clarification",   post(routes::commands::force_clarification))
+        .route("/orders/:order_id/force-ready",           post(routes::commands::force_ready))
+        .route("/orders/:order_id/reassign-worker",       post(routes::commands::reassign_worker))
+        .route("/orders/:order_id/description",           patch(routes::commands::edit_description))
+        .route("/orders/:order_id",                       delete(routes::commands::delete_order))
         // SSE
         .route("/events", get(routes::sse::stream_branch_events))
         // Actor bindings (S06)
@@ -65,6 +69,7 @@ pub fn build_router() -> Router<AppState> {
             axum::http::Method::GET,
             axum::http::Method::POST,
             axum::http::Method::DELETE,
+            axum::http::Method::PATCH,
         ])
         .allow_headers([axum::http::header::CONTENT_TYPE]);
 

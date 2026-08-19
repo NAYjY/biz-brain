@@ -1,15 +1,18 @@
 /**
- * D04 / P04: Orders page — client-side logic.
- * P04: Cancel, Reset, Resolve-Clarification inline row actions added.
- * Owner can reply to Worker directly from dashboard on any order state.
+ * D04 / P04 / P16: Orders page — full Owner control.
+ *
+ * P16 additions:
+ *   - Force-state buttons: Accepted, Unavailable, Clarification, Ready
+ *   - Reassign worker (swap without cancel+reset)
+ *   - Edit description inline
+ *   - Delete order (soft, blocked if in-flight)
  */
 
 function initOrdersPage(branchId) {
   const api = (path, opts) => BB.apiFetch(`/api/v1/branches/${branchId}${path}`, opts);
 
-  // ── State ────────────────────────────────────────────────────────── //
-
   let pendingAssignOrderId = null;
+  let pendingReassignOrderId = null;
   let customerMap = {};
 
   // ── On load ──────────────────────────────────────────────────────── //
@@ -67,12 +70,14 @@ function initOrdersPage(branchId) {
       </tr>` : '';
 
     return `
-      <tr data-order-id="${o.id}">
+      <tr data-order-id="${o.id}" data-state="${o.state}">
         <td>${pill}</td>
-        <td>${BB.escapeHtml(o.description)}</td>
+        <td>
+          <span class="order-desc" id="desc-${o.id}">${BB.escapeHtml(o.description)}</span>
+        </td>
         <td class="text-muted text-sm">${customerName}</td>
-        <td class="text-muted text-xs">${worker}</td>
-        <td><div class="order-actions" data-order-id="${o.id}" style="display:flex;gap:.5rem;"></div></td>
+        <td class="text-muted text-xs" id="worker-${o.id}">${worker}</td>
+        <td><div class="order-actions" data-order-id="${o.id}" style="display:flex;gap:.5rem;flex-wrap:wrap;" ></div></td>
       </tr>${messageRow}`;
   }
 
@@ -88,39 +93,106 @@ function initOrdersPage(branchId) {
 
     container.innerHTML = '';
 
-    // Assign button for unassigned / unavailable / cancelled states
-    if (['UNASSIGNED', 'UNAVAILABLE', 'CANCELLED'].includes(state)) {
-      const btn = actionBtn('Assign', 'btn--ghost btn--sm');
-      btn.onclick = () => openAssignWorker(orderId);
-      container.appendChild(btn);
+    const done      = state === 'DONE';
+    const cancelled = state === 'CANCELLED';
+    const unassigned= state === 'UNASSIGNED';
+    const unavail   = state === 'UNAVAILABLE';
+    const assigned  = state === 'ASSIGNED';
+    const accepted  = state === 'ACCEPTED';
+    const clarif    = state === 'PENDING_CLARIFICATION';
+    const ready     = state === 'READY_FOR_PICKUP';
+    const active    = assigned || accepted || clarif || unavail || ready;
+    const terminal  = done;
+
+    // ── Standard flow ────────────────────────────────────────────── //
+    if (unassigned || unavail || cancelled) {
+      container.appendChild(actionBtn('Assign', 'btn--ghost btn--sm', () => openAssignWorker(orderId)));
+    }
+    if (active) {
+      container.appendChild(actionBtn('Reassign', 'btn--ghost btn--sm', () => openReassignWorker(orderId)));
+    }
+    if (!done && !cancelled) {
+      container.appendChild(actionBtn('Cancel', 'btn--danger btn--sm', () => cancelOrder(orderId)));
+    }
+    if (cancelled || unavail) {
+      container.appendChild(actionBtn('Reset', 'btn--ghost btn--sm', () => resetOrder(orderId)));
+    }
+    if (active || ready) {
+      container.appendChild(actionBtn('Close', 'btn--ghost btn--sm', () => closeOrder(orderId)));
     }
 
-    // P04: Cancel button — all non-Done, non-Cancelled states
-    if (!['DONE', 'CANCELLED', ''].includes(state)) {
-      const btn = actionBtn('Cancel', 'btn--danger btn--sm');
-      btn.onclick = () => cancelOrder(orderId);
-      container.appendChild(btn);
+    // ── P16: Force-state group ───────────────────────────────────── //
+    if (!terminal) {
+      const forceMenu = buildForceMenu(orderId, state);
+      container.appendChild(forceMenu);
     }
 
-    // P04: Reset button — Cancelled or Unavailable
-    if (['CANCELLED', 'UNAVAILABLE'].includes(state)) {
-      const btn = actionBtn('Reset', 'btn--ghost btn--sm');
-      btn.onclick = () => resetOrder(orderId);
-      container.appendChild(btn);
+    // ── P16: Edit description ────────────────────────────────────── //
+    if (!terminal) {
+      container.appendChild(actionBtn('Edit', 'btn--ghost btn--sm', () => editDescription(orderId)));
     }
 
-    // Close button — active non-Done states
-    if (!['DONE', 'CANCELLED', 'UNASSIGNED', ''].includes(state)) {
-      const btn = actionBtn('Close', 'btn--ghost btn--sm');
-      btn.onclick = () => closeOrder(orderId);
-      container.appendChild(btn);
+    // ── P16: Delete ──────────────────────────────────────────────── //
+    if (done || cancelled || unassigned || unavail) {
+      container.appendChild(actionBtn('Delete', 'btn--danger btn--sm', () => deleteOrder(orderId)));
     }
   }
 
-  function actionBtn(label, classes) {
+  function buildForceMenu(orderId, state) {
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'position:relative;display:inline-block;';
+
+    const trigger = actionBtn('Force ▾', 'btn--ghost btn--sm');
+    wrapper.appendChild(trigger);
+
+    const menu = document.createElement('div');
+    menu.style.cssText = [
+      'display:none;position:absolute;top:100%;left:0;z-index:50;',
+      'background:var(--color-surface);border:1px solid var(--color-border);',
+      'border-radius:var(--radius-md);min-width:180px;box-shadow:0 4px 16px rgba(0,0,0,.3);',
+    ].join('');
+
+    const items = [
+      { label: 'Force → Accepted',     fn: () => forceState(orderId, 'force-accepted') },
+      { label: 'Force → Unavailable',  fn: () => forceState(orderId, 'force-unavailable') },
+      { label: 'Force → Clarification',fn: () => forceState(orderId, 'force-clarification') },
+      { label: 'Force → Ready',        fn: () => forceState(orderId, 'force-ready') },
+    ];
+
+    items.forEach(({ label, fn }) => {
+      const item = document.createElement('button');
+      item.textContent = label;
+      item.style.cssText = [
+        'display:block;width:100%;padding:.5rem .75rem;text-align:left;',
+        'background:none;border:none;cursor:pointer;font-size:var(--text-sm);',
+        'color:var(--color-text);transition:background .1s;',
+      ].join('');
+      item.onmouseenter = () => { item.style.background = 'var(--color-surface-2)'; };
+      item.onmouseleave = () => { item.style.background = 'none'; };
+      item.onclick = () => { menu.style.display = 'none'; fn(); };
+      menu.appendChild(item);
+    });
+
+    wrapper.appendChild(menu);
+
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      const open = menu.style.display === 'block';
+      document.querySelectorAll('.force-menu-open').forEach(m => { m.style.display = 'none'; m.classList.remove('force-menu-open'); });
+      menu.style.display = open ? 'none' : 'block';
+      if (!open) menu.classList.add('force-menu-open');
+    };
+
+    document.addEventListener('click', () => { menu.style.display = 'none'; }, { once: true, capture: true });
+
+    return wrapper;
+  }
+
+  function actionBtn(label, classes, onClick) {
     const b = document.createElement('button');
     b.className = `btn ${classes}`;
     b.textContent = label;
+    if (onClick) b.onclick = onClick;
     return b;
   }
 
@@ -167,10 +239,7 @@ function initOrdersPage(branchId) {
     const newName = newNameEl.value.trim();
     if (newName) {
       try {
-        const c = await api('/customers', {
-          method: 'POST',
-          body: JSON.stringify({ name: newName }),
-        });
+        const c = await api('/customers', { method: 'POST', body: JSON.stringify({ name: newName }) });
         customerId = c.id;
         await loadCustomers();
       } catch (e) {
@@ -182,12 +251,9 @@ function initOrdersPage(branchId) {
     if (!customerId) { BB.showToast('Select or create a customer', 'error'); return; }
 
     try {
-      await api('/orders', {
-        method: 'POST',
-        body: JSON.stringify({ customer_id: customerId, description }),
-      });
+      await api('/orders', { method: 'POST', body: JSON.stringify({ customer_id: customerId, description }) });
       BB.closeModal('create-order-modal');
-      descEl.value   = '';
+      descEl.value = '';
       newNameEl.value = '';
       document.getElementById('new-customer-row').style.display = 'none';
       await refreshOrderList();
@@ -200,6 +266,7 @@ function initOrdersPage(branchId) {
 
   function openAssignWorker(orderId) {
     pendingAssignOrderId = orderId;
+    document.getElementById('assign-worker-modal-title').textContent = 'Assign Worker';
     BB.openModal('assign-worker-modal');
   }
 
@@ -221,6 +288,118 @@ function initOrdersPage(branchId) {
       BB.showToast(`Assign failed: ${e.message}`, 'error');
     }
   });
+
+  // ── P16: Reassign Worker ─────────────────────────────────────────── //
+
+  function openReassignWorker(orderId) {
+    pendingReassignOrderId = orderId;
+    document.getElementById('assign-worker-modal-title').textContent = 'Reassign Worker';
+    BB.openModal('assign-worker-modal');
+  }
+
+  // Override assign button to handle reassign too
+  const originalAssignClick = document.getElementById('assign-worker-btn').onclick;
+  document.getElementById('assign-worker-btn').onclick = async () => {
+    const workerId = document.getElementById('assign-worker-select').value;
+    if (!workerId) { BB.showToast('Select a worker', 'error'); return; }
+
+    if (pendingReassignOrderId && !pendingAssignOrderId) {
+      const ok = await BB.confirm('Reassign this order to a different worker? They will be notified.');
+      if (!ok) return;
+      try {
+        await api(`/orders/${pendingReassignOrderId}/reassign-worker`, {
+          method: 'POST',
+          body: JSON.stringify({ worker_id: workerId }),
+        });
+        BB.closeModal('assign-worker-modal');
+        pendingReassignOrderId = null;
+        BB.showToast('Worker reassigned', 'success');
+      } catch (e) {
+        BB.showToast(`Reassign failed: ${e.message}`, 'error');
+      }
+      return;
+    }
+
+    // Normal assign path
+    const ok = await BB.confirm('Assign this worker? A message will be sent to them immediately.');
+    if (!ok) return;
+    try {
+      await api(`/orders/${pendingAssignOrderId}/assign-worker`, {
+        method: 'POST',
+        body: JSON.stringify({ worker_id: workerId }),
+      });
+      BB.closeModal('assign-worker-modal');
+      pendingAssignOrderId = null;
+      BB.showToast('Worker assigned', 'success');
+    } catch (e) {
+      BB.showToast(`Assign failed: ${e.message}`, 'error');
+    }
+  };
+
+  // ── P16: Force state ─────────────────────────────────────────────── //
+
+  async function forceState(orderId, endpoint) {
+    const label = endpoint.replace('force-', '').replace(/-/g, ' ');
+    const ok = await BB.confirm(`Force order to "${label}"? This bypasses normal Worker messaging.`);
+    if (!ok) return;
+    try {
+      await api(`/orders/${orderId}/${endpoint}`, { method: 'POST', body: JSON.stringify({}) });
+      BB.showToast(`Forced → ${label}`, 'success');
+    } catch (e) {
+      BB.showToast(`Force failed: ${e.message}`, 'error');
+    }
+  }
+
+  // ── P16: Edit description ────────────────────────────────────────── //
+
+  async function editDescription(orderId) {
+    const descEl = document.getElementById(`desc-${orderId}`);
+    const current = descEl?.textContent?.trim() ?? '';
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal" style="width:480px;">
+        <div class="modal__header">
+          <span class="modal__title">Edit description</span>
+          <button class="btn btn--ghost btn--sm" data-action="cancel">✕</button>
+        </div>
+        <div class="modal__body">
+          <div class="form-group">
+            <label class="form-label">Description</label>
+            <textarea class="form-textarea" id="edit-desc-input" style="min-height:100px;">${BB.escapeHtml(current)}</textarea>
+          </div>
+        </div>
+        <div class="modal__footer">
+          <button class="btn btn--ghost" data-action="cancel">Cancel</button>
+          <button class="btn btn--primary" data-action="save">Save</button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(backdrop);
+    backdrop.querySelector('#edit-desc-input').focus();
+
+    backdrop.addEventListener('click', async (e) => {
+      const action = e.target.closest('[data-action]')?.dataset.action;
+      if (!action) return;
+      if (action === 'cancel') { backdrop.remove(); return; }
+
+      const newDesc = backdrop.querySelector('#edit-desc-input').value.trim();
+      if (!newDesc) { BB.showToast('Description cannot be empty', 'error'); return; }
+
+      try {
+        await api(`/orders/${orderId}/description`, {
+          method: 'PATCH',
+          body: JSON.stringify({ description: newDesc }),
+        });
+        backdrop.remove();
+        if (descEl) descEl.textContent = newDesc;
+        BB.showToast('Description updated', 'success');
+      } catch (err) {
+        BB.showToast(`Save failed: ${err.message}`, 'error');
+      }
+    });
+  }
 
   // ── P04: Cancel / Reset / Close ──────────────────────────────────── //
 
@@ -254,6 +433,31 @@ function initOrdersPage(branchId) {
       BB.showToast('Order closed', 'success');
     } catch (e) {
       BB.showToast(`Close failed: ${e.message}`, 'error');
+    }
+  }
+
+  // ── P16: Delete ──────────────────────────────────────────────────── //
+
+  async function deleteOrder(orderId) {
+    const ok = await BB.confirm('Permanently delete this order? This cannot be undone.');
+    if (!ok) return;
+    try {
+      await api(`/orders/${orderId}`, { method: 'DELETE' });
+      const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
+      const msgRow = row?.nextElementSibling;
+      if (msgRow?.classList.contains('worker-message-row')) msgRow.remove();
+      row?.remove();
+      maybeShowEmpty();
+      BB.showToast('Order deleted', 'success');
+    } catch (e) {
+      BB.showToast(`Delete failed: ${e.message}`, 'error');
+    }
+  }
+
+  function maybeShowEmpty() {
+    const tbody = document.getElementById('orders-tbody');
+    if (tbody && tbody.querySelectorAll('tr[data-order-id]').length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="data-table__empty">No orders yet.</td></tr>';
     }
   }
 

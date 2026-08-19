@@ -102,6 +102,230 @@ pub async fn reset_order(
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
+// ── P16: Force-set state ──────────────────────────────────────────────────── //
+
+#[derive(Debug, Deserialize)]
+pub struct ForceStateRequest {
+    /// Optional note recorded in the audit trail.
+    pub note: Option<String>,
+}
+
+/// POST /branches/:branch_id/orders/:order_id/force-accepted
+/// Owner forces the order to Accepted without waiting for Worker to reply.
+pub async fn force_accepted(
+    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+    Json(_req): Json<ForceStateRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let event = DomainEvent::OwnerForceAccepted { order_id: OrderId::new(order_id) };
+    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
+}
+
+/// POST /branches/:branch_id/orders/:order_id/force-unavailable
+/// Owner marks Worker as unavailable for this order.
+pub async fn force_unavailable(
+    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+    Json(_req): Json<ForceStateRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // Use the currently-assigned worker_id from the projection.
+    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
+    )
+    .bind(order_id).bind(branch_id)
+    .fetch_optional(&state.pool).await.map_err(internal)?;
+
+    let worker_id = row
+        .and_then(|(id,)| id)
+        .ok_or_else(|| bad_request("no worker assigned — assign a worker first"))?;
+
+    let event = DomainEvent::OwnerForceUnavailable {
+        worker_id: WorkerId::new(worker_id),
+        order_id: OrderId::new(order_id),
+    };
+    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
+}
+
+/// POST /branches/:branch_id/orders/:order_id/force-clarification
+/// Owner manually opens a PendingClarification state.
+pub async fn force_clarification(
+    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+    Json(_req): Json<ForceStateRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let event = DomainEvent::OwnerForceClarification { order_id: OrderId::new(order_id) };
+    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
+}
+
+/// POST /branches/:branch_id/orders/:order_id/force-ready
+/// Owner marks the order as ready for pickup.
+pub async fn force_ready(
+    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+    Json(_req): Json<ForceStateRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let event = DomainEvent::OwnerForceReady { order_id: OrderId::new(order_id) };
+    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
+}
+
+// ── P16: Reassign worker ──────────────────────────────────────────────────── //
+
+#[derive(Debug, Deserialize)]
+pub struct ReassignWorkerRequest {
+    pub worker_id: Uuid,
+}
+
+/// POST /branches/:branch_id/orders/:order_id/reassign-worker
+/// Swap the assigned Worker without cancel+reset.
+pub async fn reassign_worker(
+    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+    Json(req): Json<ReassignWorkerRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let binding: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM actor_directory \
+         WHERE actor_id = $1 AND actor_type = 'worker' AND owner_confirmed = TRUE",
+    )
+    .bind(req.worker_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+
+    if binding.is_none() {
+        return Err(bad_request(
+            "Worker has no confirmed channel binding. Confirm it on the Workers & Suppliers page first.",
+        ));
+    }
+
+    let event = DomainEvent::OwnerReassignWorker {
+        new_worker_id: WorkerId::new(req.worker_id),
+        order_id: OrderId::new(order_id),
+    };
+    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
+}
+
+// ── P16: Edit description ─────────────────────────────────────────────────── //
+
+#[derive(Debug, Deserialize)]
+pub struct EditDescriptionRequest {
+    pub description: String,
+}
+
+/// PATCH /branches/:branch_id/orders/:order_id/description
+/// Edit order description — logged to order_description_edits; not an event.
+pub async fn edit_description(
+    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+    Json(req): Json<EditDescriptionRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let desc = req.description.trim().to_string();
+    if desc.is_empty() {
+        return Err(bad_request("description cannot be empty"));
+    }
+    if desc.len() > 1000 {
+        return Err(bad_request("description max 1000 characters"));
+    }
+
+    // Verify order belongs to this branch.
+    let exists: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM orders WHERE id = $1 AND branch_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(order_id).bind(branch_id)
+    .fetch_optional(&state.pool).await.map_err(internal)?;
+
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, "order not found".to_string()));
+    }
+
+    sqlx::query(
+        "INSERT INTO order_description_edits (order_id, new_description) VALUES ($1, $2)",
+    )
+    .bind(order_id).bind(&desc)
+    .execute(&state.pool).await.map_err(internal)?;
+
+    // Update projection immediately (no event stream — description is metadata).
+    sqlx::query(
+        "UPDATE order_current_state SET description = $1, updated_at = NOW() \
+         WHERE order_id = $2",
+    )
+    .bind(&desc).bind(order_id)
+    .execute(&state.pool).await.map_err(internal)?;
+
+    // Publish SSE so the dashboard refreshes.
+    let meta: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT branch_id FROM orders WHERE id = $1",
+    )
+    .bind(order_id).fetch_optional(&state.pool).await.map_err(internal)?;
+
+    if let Some((bid,)) = meta {
+        state.publish_sse(domain::SseSignal::OrderChanged {
+            order_id: domain::OrderId::new(order_id),
+            branch_id: domain::BranchId::new(bid),
+        }).await;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── P16: Delete order (soft) ──────────────────────────────────────────────── //
+
+/// DELETE /branches/:branch_id/orders/:order_id
+/// Soft-deletes an order. Blocked if the order has in-flight worker activity.
+pub async fn delete_order(
+    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // Block deletion if order is actively assigned or accepted.
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT state FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
+    )
+    .bind(order_id).bind(branch_id)
+    .fetch_optional(&state.pool).await.map_err(internal)?;
+
+    if let Some((state_str,)) = row {
+        let blocked = matches!(
+            state_str.as_str(),
+            "ASSIGNED" | "ACCEPTED" | "PENDING_CLARIFICATION" | "READY_FOR_PICKUP"
+        );
+        if blocked {
+            return Err((StatusCode::CONFLICT,
+                format!("Cannot delete an order in state '{state_str}'. Cancel or close it first.")));
+        }
+    }
+
+    let result = sqlx::query(
+        "UPDATE orders SET deleted_at = NOW() WHERE id = $1 AND branch_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(order_id).bind(branch_id)
+    .execute(&state.pool).await.map_err(internal)?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "order not found".to_string()));
+    }
+
+    // Remove from projection so it disappears from the dashboard.
+    sqlx::query("DELETE FROM order_current_state WHERE order_id = $1")
+        .bind(order_id).execute(&state.pool).await.map_err(internal)?;
+
+    // Publish SSE so the list refreshes.
+    let meta: Option<(uuid::Uuid,)> = sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
+        .bind(order_id).fetch_optional(&state.pool).await.map_err(internal)?;
+    if let Some((bid,)) = meta {
+        state.publish_sse(domain::SseSignal::OrderChanged {
+            order_id: domain::OrderId::new(order_id),
+            branch_id: domain::BranchId::new(bid),
+        }).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── P04: Resolve Clarification ────────────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]

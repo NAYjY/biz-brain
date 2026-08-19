@@ -1,11 +1,8 @@
 //! EventHandler fan-out — fires push notifications after each DomainEvent.
 //!
-//! P04: OwnerCancelled pushes a cancellation notice to the Worker (if any);
-//! ClarificationResolved pushes Owner's reply back to the Worker.
-//! OrderReset has no outbound push.
-//!
-//! Errors are logged but never propagate — a failed push must not roll back
-//! the event that already landed in the store.
+//! P04: OwnerCancelled, ClarificationResolved push to Worker.
+//! P16: OwnerForceUnavailable notifies Worker; OwnerReassignWorker notifies
+//!      both old worker (removed) and new worker (assigned).
 
 use domain::{Channel, ChannelIdentity, DomainEvent};
 use messaging::ChannelAdapter;
@@ -35,9 +32,6 @@ async fn try_fan_out(
             send_to_identity(state, &identity, &text).await;
         }
 
-        // P04: notify the assigned Worker if there is one — best-effort only,
-        // so we use .await.ok() instead of ? to avoid failing the whole fan-out
-        // when the order simply has no Worker yet.
         DomainEvent::OwnerCancelled { order_id } => {
             let desc = order_description(&state.pool, order_id.into_inner()).await?;
             if let Some(identity) = assigned_worker_identity(&state.pool, order_id.into_inner()).await {
@@ -46,7 +40,6 @@ async fn try_fan_out(
             }
         }
 
-        // P04: clarification resolved — push Owner's reply to the Worker.
         DomainEvent::ClarificationResolved { worker_id, order_id } => {
             let desc = order_description(&state.pool, order_id.into_inner()).await?;
             let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
@@ -55,6 +48,40 @@ async fn try_fan_out(
                  Order is back to Assigned. Please proceed."
             );
             send_to_identity(state, &identity, &text).await;
+        }
+
+        // P16: notify Worker they've been marked unavailable by Owner.
+        DomainEvent::OwnerForceUnavailable { worker_id, order_id } => {
+            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            if let Ok(identity) = worker_identity(&state.pool, worker_id.into_inner()).await {
+                let text = format!("ℹ️ Owner has marked you as unavailable for: {desc}");
+                send_to_identity(state, &identity, &text).await;
+            }
+        }
+
+        // P16: notify new Worker of assignment; old worker gets a removal notice.
+        DomainEvent::OwnerReassignWorker { new_worker_id, order_id } => {
+            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+
+            // Notify new worker.
+            if let Ok(identity) = worker_identity(&state.pool, new_worker_id.into_inner()).await {
+                let text = format!(
+                    "📋 You have been reassigned to: {desc}\n\
+                     Reply 'รับงาน' (accept) or 'ไม่ว่าง' (unavailable)."
+                );
+                send_to_identity(state, &identity, &text).await;
+            }
+
+            // Notify old worker if there was one (best-effort).
+            if let Some(old_identity) = assigned_worker_identity(&state.pool, order_id.into_inner()).await {
+                if old_identity.external_id !=
+                    worker_identity(&state.pool, new_worker_id.into_inner())
+                        .await.map(|i| i.external_id).unwrap_or_default()
+                {
+                    let text = format!("ℹ️ You have been reassigned away from: {desc}");
+                    send_to_identity(state, &old_identity, &text).await;
+                }
+            }
         }
 
         DomainEvent::SupplyRequestSent { supply_request_id, branch_id } => {
@@ -76,7 +103,6 @@ async fn try_fan_out(
             send_to_identity(state, &identity, text).await;
         }
 
-        // All others: SSE handles the dashboard refresh, no push needed.
         _ => {}
     }
 
@@ -99,6 +125,17 @@ async fn send_to_identity(state: &AppState, identity: &ChannelIdentity, text: &s
 // ── DB helpers ───────────────────────────────────────────────────────────── //
 
 async fn order_description(pool: &PgPool, order_id: Uuid) -> Result<String, sqlx::Error> {
+    // Prefer the most recent description edit; fall back to the original.
+    let edited: Option<String> = sqlx::query_scalar(
+        "SELECT new_description FROM order_description_edits \
+         WHERE order_id = $1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(order_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(d) = edited { return Ok(d); }
+
     let (desc,): (String,) =
         sqlx::query_as("SELECT description FROM orders WHERE id = $1")
             .bind(order_id)
@@ -134,9 +171,6 @@ async fn worker_identity(
     Ok(ChannelIdentity { channel: parse_channel(&channel_str)?, external_id })
 }
 
-/// P04: returns `Some(identity)` for the assigned Worker, `None` if none assigned
-/// or the lookup fails. Intentionally infallible so OwnerCancelled never errors
-/// just because an order was never assigned.
 async fn assigned_worker_identity(pool: &PgPool, order_id: Uuid) -> Option<ChannelIdentity> {
     let row: Option<(Uuid,)> = sqlx::query_as(
         "SELECT worker_id FROM order_current_state \

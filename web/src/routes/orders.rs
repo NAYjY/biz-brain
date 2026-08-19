@@ -1,8 +1,6 @@
-//! D04: Orders view — SSR initial render (D03 pattern).
-//!
-//! First paint: queries projection table directly (not via api loopback).
-//! Subsequent updates: client JS fetches /api/v1/branches/:id/orders.
-//! SSE: OrderChanged signal triggers whole-list re-fetch (D06/D03).
+//! D04 / P16: Orders view — SSR initial render.
+//! P16: assign-worker modal now has a dynamic title element for
+//!      dual-purpose assign/reassign; delete button shown for terminal states.
 
 use axum::{
     extract::{Path, State},
@@ -12,9 +10,8 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 use api::AppState;
-use store::ProjectionTables;
 
-use crate::auth::{auth_error_response, authorize_branch, BranchAuthOutcome};
+use crate::auth::{auth_error_response, authorize_branch};
 use crate::templates::{shell_open, shell_close, topbar_html, page_not_found};
 
 pub async fn render_orders(
@@ -27,23 +24,18 @@ pub async fn render_orders(
         return err;
     }
 
-    // D03: first paint queries projection table directly (server-side).
     let orders = match state.projections.orders_by_branch(branch_id).await {
         Ok(rows) => rows,
         Err(e) => {
             eprintln!("orders query failed: {e:?}");
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "DB error").into_response();
-        },
+        }
     };
 
     let orders_rows_html = if orders.is_empty() {
         r#"<tr><td colspan="5" class="data-table__empty">No orders yet. Create one to get started.</td></tr>"#.to_string()
     } else {
-        orders
-            .iter()
-            .map(|o| order_row_html(o))
-            .collect::<Vec<_>>()
-            .join("\n")
+        orders.iter().map(order_row_html).collect::<Vec<_>>().join("\n")
     };
 
     let html = format!(r#"{}
@@ -109,11 +101,11 @@ pub async fn render_orders(
   </div>
 </div>
 
-<!-- Assign Worker modal -->
+<!-- Assign / Reassign Worker modal (dual-purpose, title set by JS) -->
 <div class="modal-backdrop hidden" id="assign-worker-modal">
   <div class="modal">
     <div class="modal__header">
-      <span class="modal__title">Assign Worker</span>
+      <span class="modal__title" id="assign-worker-modal-title">Assign Worker</span>
       <button class="btn btn--ghost btn--sm" onclick="BB.closeModal('assign-worker-modal')">✕</button>
     </div>
     <div class="modal__body">
@@ -124,7 +116,7 @@ pub async fn render_orders(
     </div>
     <div class="modal__footer">
       <button class="btn btn--ghost" onclick="BB.closeModal('assign-worker-modal')">Cancel</button>
-      <button class="btn btn--primary" id="assign-worker-btn">Assign</button>
+      <button class="btn btn--primary" id="assign-worker-btn">Confirm</button>
     </div>
   </div>
 </div>
@@ -147,13 +139,12 @@ pub async fn render_orders(
 
 fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     let state_lower = o.state.to_lowercase();
- 
+
     let worker_cell = match o.worker_id {
         Some(id) => format!(r#"<span class="font-mono text-xs">{}</span>"#, &id.to_string()[..8]),
         None => "—".to_string(),
     };
- 
-    // Worker message bubble — same markup as orders.js orderRowHtml so CSS matches
+
     let message_row = match &o.last_worker_message {
         Some(msg) => format!(
             r#"<tr class="worker-message-row">
@@ -167,28 +158,30 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
                placeholder="Reply to worker…"
                id="reply-{id}">
         <button class="btn btn--primary btn--sm"
-                onclick="BB.sendWorkerReply('{id}')">Send</button>
+                onclick="BB.sendWorkerReply('{id}', '{state}')">Send</button>
       </div>
     </div>
   </td>
 </tr>"#,
             msg = html_escape(msg),
             id = o.id,
+            state = o.state,
         ),
         None => String::new(),
     };
- 
+
     format!(
-        r#"<tr data-order-id="{id}">
-  <td><span class="state-pill state-pill--{state_lower}">{state}</span></td>
-  <td>{desc}</td>
+        r#"<tr data-order-id="{id}" data-state="{state}">
+  <td><span class="state-pill state-pill--{state_lower}">{state_display}</span></td>
+  <td><span class="order-desc" id="desc-{id}">{desc}</span></td>
   <td class="text-muted font-mono text-xs">{customer}</td>
   <td class="text-muted text-xs" id="worker-{id}">{worker}</td>
-  <td><div style="display:flex;gap:.5rem;" class="order-actions" data-order-id="{id}"></div></td>
+  <td><div style="display:flex;gap:.5rem;flex-wrap:wrap;" class="order-actions" data-order-id="{id}"></div></td>
 </tr>{message_row}"#,
         id = o.id,
+        state = o.state,
         state_lower = state_lower,
-        state = o.state.replace('_', " "),
+        state_display = o.state.replace('_', " "),
         desc = html_escape(&o.description),
         customer = &o.customer_id.to_string()[..8],
         worker = worker_cell,

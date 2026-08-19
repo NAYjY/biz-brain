@@ -1,7 +1,9 @@
 //! Order aggregate — closed enum state, runtime-validated transitions (T01).
 //!
-//! P04/P15: added transitions for OwnerCancelled, OrderReset,
-//! ClarificationResolved events.
+//! P04/P15: OwnerCancelled, OrderReset, ClarificationResolved.
+//! P16: Owner force-state transitions — Owner can move to any non-Done state
+//!      from any non-Done state (bypasses Worker messaging). Done is still
+//!      terminal and requires the explicit Close command.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,14 +25,14 @@ pub enum OrderState {
 impl std::fmt::Display for OrderState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Self::Unassigned          => "UNASSIGNED",
-            Self::Assigned            => "ASSIGNED",
-            Self::Accepted            => "ACCEPTED",
-            Self::PendingClarification=> "PENDING_CLARIFICATION",
-            Self::Unavailable         => "UNAVAILABLE",
-            Self::ReadyForPickup      => "READY_FOR_PICKUP",
-            Self::Done                => "DONE",
-            Self::Cancelled           => "CANCELLED",
+            Self::Unassigned           => "UNASSIGNED",
+            Self::Assigned             => "ASSIGNED",
+            Self::Accepted             => "ACCEPTED",
+            Self::PendingClarification => "PENDING_CLARIFICATION",
+            Self::Unavailable          => "UNAVAILABLE",
+            Self::ReadyForPickup       => "READY_FOR_PICKUP",
+            Self::Done                 => "DONE",
+            Self::Cancelled            => "CANCELLED",
         };
         write!(f, "{s}")
     }
@@ -46,7 +48,6 @@ pub struct Order {
     pub created_at: DateTime<Utc>,
 }
 
-/// Error attempting an illegal state transition.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("invalid Order transition: {from} -> {to}")]
 pub struct TransitionError {
@@ -71,7 +72,6 @@ impl Order {
         }
     }
 
-    /// Validates and applies a transition.  All legality lives here.
     pub fn transition(&mut self, to: OrderState) -> Result<(), TransitionError> {
         if !Self::is_valid(self.state, to) {
             return Err(TransitionError { from: self.state, to });
@@ -80,22 +80,27 @@ impl Order {
         Ok(())
     }
 
-    /// P04/P15: is_valid extended to cover OwnerCancelled (all non-Done →
-    /// Cancelled) and OrderReset (Unavailable|Cancelled → Unassigned).
+    /// P16: Owner-bypass transition — any non-Done state → any non-Done state.
+    /// Done is always terminal; Cancelled can only be reached via explicit cancel.
+    pub fn owner_force(&mut self, to: OrderState) -> Result<(), TransitionError> {
+        if self.state == OrderState::Done {
+            return Err(TransitionError { from: self.state, to });
+        }
+        self.state = to;
+        Ok(())
+    }
+
     fn is_valid(from: OrderState, to: OrderState) -> bool {
         use OrderState::*;
         match from {
-            // Standard Worker-driven transitions
-            Unassigned            => matches!(to, Assigned | Cancelled),
-            Assigned              => matches!(to, Accepted | Unavailable | PendingClarification | Cancelled),
-            Accepted              => matches!(to, ReadyForPickup | Cancelled),
-            PendingClarification  => matches!(to, Assigned | Cancelled),
-            Unavailable           => matches!(to, Unassigned | Cancelled),
-            ReadyForPickup        => matches!(to, Done | Cancelled),
-            // P04: Cancelled can be reset to Unassigned (OrderReset event)
-            Cancelled             => matches!(to, Unassigned),
-            // Done is terminal
-            Done                  => false,
+            Unassigned           => matches!(to, Assigned | Cancelled),
+            Assigned             => matches!(to, Accepted | Unavailable | PendingClarification | Cancelled),
+            Accepted             => matches!(to, ReadyForPickup | Cancelled),
+            PendingClarification => matches!(to, Assigned | Cancelled),
+            Unavailable          => matches!(to, Unassigned | Cancelled),
+            ReadyForPickup       => matches!(to, Done | Cancelled),
+            Cancelled            => matches!(to, Unassigned),
+            Done                 => false,
         }
     }
 

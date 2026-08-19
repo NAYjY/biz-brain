@@ -1,9 +1,8 @@
 //! T02: append domain events to the correct stream with optimistic
 //! concurrency via UNIQUE (aggregate_id, sequence).
 //!
-//! P04/P15: OwnerCancelled, OrderReset, ClarificationResolved added to the
-//! worker_id extraction match so they serialize correctly (worker_id is NULL
-//! for OwnerCancelled and OrderReset, Some for ClarificationResolved).
+//! P04/P15: OwnerCancelled, OrderReset, ClarificationResolved added.
+//! P16: OwnerForce* and OwnerReassignWorker added.
 
 use domain::{Aggregate, BranchId, DomainEvent, DomainEventVariant};
 use sqlx::PgPool;
@@ -25,7 +24,6 @@ impl EventSourcing {
         Self { pool }
     }
 
-    /// Append `event` as the next sequence number in its aggregate's stream.
     pub async fn append(
         &self,
         branch_id: BranchId,
@@ -53,7 +51,6 @@ impl EventSourcing {
     ) -> Result<(), AppendError> {
         let aggregate_id = event.order_id().expect("Order-aggregate variant must carry order_id");
 
-        // worker_id is NULL for events that have no Worker context.
         let worker_id: Option<uuid::Uuid> = match event {
             DomainEvent::WorkerAssigned { worker_id, .. }
             | DomainEvent::WorkerAccepted { worker_id, .. }
@@ -61,10 +58,23 @@ impl EventSourcing {
             | DomainEvent::WorkerCancelled { worker_id, .. }
             | DomainEvent::ClarificationRequested { worker_id, .. }
             | DomainEvent::WorkerReadyForPickup { worker_id, .. }
-            | DomainEvent::ClarificationResolved { worker_id, .. } => {
+            | DomainEvent::ClarificationResolved { worker_id, .. }
+            | DomainEvent::OwnerForceUnavailable { worker_id, .. } => {
                 Some(worker_id.into_inner())
             }
-            // OrderDone, OwnerCancelled, OrderReset carry no worker_id.
+            // P16: reassign carries new_worker_id in the worker_id column.
+            DomainEvent::OwnerReassignWorker { new_worker_id, .. } => {
+                Some(new_worker_id.into_inner())
+            }
+            // Force events that operate on existing worker — no worker_id stored
+            // (the projection worker reads it from the existing state).
+            DomainEvent::OwnerForceAccepted { .. }
+            | DomainEvent::OwnerForceClarification { .. }
+            | DomainEvent::OwnerForceReady { .. }
+            // No-worker events
+            | DomainEvent::OrderDone { .. }
+            | DomainEvent::OwnerCancelled { .. }
+            | DomainEvent::OrderReset { .. } => None,
             _ => None,
         };
 

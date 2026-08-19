@@ -1,9 +1,6 @@
-//! T02: async projection worker — reconstructs current state from a replayed
-//! event stream and writes the projection tables.  Per T07, the SSE signal
-//! is fired from here so a client re-fetch is guaranteed consistent.
-//!
-//! P04/P15: order_state_of extended for OwnerCancelled, OrderReset,
-//! ClarificationResolved.
+//! T02: async projection worker.
+//! P04/P15: OwnerCancelled, OrderReset, ClarificationResolved.
+//! P16: OwnerForce* and OwnerReassignWorker state derivation.
 
 use domain::{DomainEvent, OrderId, OrderState, SseSignal, SupplyRequestId, SupplyRequestState};
 use sqlx::PgPool;
@@ -29,8 +26,6 @@ impl ProjectionWorker {
         }
     }
 
-    /// Replay `order_id`'s stream, derive current OrderState, write the
-    /// projection, and return the T07 invalidation signal.
     pub async fn project_order(&self, order_id: OrderId) -> Result<SseSignal, ReadError> {
         let events = self.order_events.load_stream(order_id).await?;
 
@@ -41,6 +36,7 @@ impl ProjectionWorker {
             .unwrap_or(OrderState::Unassigned);
 
         // Most recent worker-bearing event supplies the worker_id.
+        // OwnerReassignWorker stores new_worker_id in the worker_id column.
         let worker_id = events.iter().rev().find_map(|e| match e {
             DomainEvent::WorkerAssigned { worker_id, .. }
             | DomainEvent::WorkerAccepted { worker_id, .. }
@@ -48,13 +44,14 @@ impl ProjectionWorker {
             | DomainEvent::WorkerCancelled { worker_id, .. }
             | DomainEvent::ClarificationRequested { worker_id, .. }
             | DomainEvent::WorkerReadyForPickup { worker_id, .. }
-            | DomainEvent::ClarificationResolved { worker_id, .. } => Some(worker_id.into_inner()),
+            | DomainEvent::ClarificationResolved { worker_id, .. }
+            | DomainEvent::OwnerForceUnavailable { worker_id, .. } => Some(worker_id.into_inner()),
+            DomainEvent::OwnerReassignWorker { new_worker_id, .. } => Some(new_worker_id.into_inner()),
             _ => None,
         });
 
-        // Clear worker_id when order is reset to Unassigned.
         let effective_worker_id = match state {
-            OrderState::Unassigned => None,
+            OrderState::Unassigned | OrderState::Cancelled => None,
             _ => worker_id,
         };
 
@@ -65,8 +62,19 @@ impl ProjectionWorker {
         .fetch_one(&self.pool)
         .await?;
 
+        // Use the most recent description edit if any exists.
+        let description: String = sqlx::query_scalar(
+            "SELECT new_description FROM order_description_edits \
+             WHERE order_id = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(order_id.into_inner())
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap_or(None)
+        .unwrap_or_else(|| meta.2.clone());
+
         self.projections
-            .upsert_order_state(order_id, meta.0, meta.1, &meta.2, state, effective_worker_id)
+            .upsert_order_state(order_id, meta.0, meta.1, &description, state, effective_worker_id)
             .await?;
 
         Ok(SseSignal::OrderChanged {
@@ -105,27 +113,33 @@ impl ProjectionWorker {
 
     fn order_state_of(event: &DomainEvent) -> Option<OrderState> {
         Some(match event {
-            DomainEvent::WorkerAssigned { .. }        => OrderState::Assigned,
-            DomainEvent::WorkerAccepted { .. }        => OrderState::Accepted,
-            DomainEvent::WorkerUnavailable { .. }     => OrderState::Unavailable,
-            DomainEvent::WorkerCancelled { .. }       => OrderState::Cancelled,
-            DomainEvent::ClarificationRequested { .. }=> OrderState::PendingClarification,
-            DomainEvent::WorkerReadyForPickup { .. }  => OrderState::ReadyForPickup,
-            DomainEvent::OrderDone { .. }             => OrderState::Done,
+            DomainEvent::WorkerAssigned { .. }         => OrderState::Assigned,
+            DomainEvent::WorkerAccepted { .. }         => OrderState::Accepted,
+            DomainEvent::WorkerUnavailable { .. }      => OrderState::Unavailable,
+            DomainEvent::WorkerCancelled { .. }        => OrderState::Cancelled,
+            DomainEvent::ClarificationRequested { .. } => OrderState::PendingClarification,
+            DomainEvent::WorkerReadyForPickup { .. }   => OrderState::ReadyForPickup,
+            DomainEvent::OrderDone { .. }              => OrderState::Done,
             // P04
-            DomainEvent::OwnerCancelled { .. }        => OrderState::Cancelled,
-            DomainEvent::OrderReset { .. }            => OrderState::Unassigned,
-            DomainEvent::ClarificationResolved { .. } => OrderState::Assigned,
+            DomainEvent::OwnerCancelled { .. }         => OrderState::Cancelled,
+            DomainEvent::OrderReset { .. }             => OrderState::Unassigned,
+            DomainEvent::ClarificationResolved { .. }  => OrderState::Accepted,
+            // P16
+            DomainEvent::OwnerForceAccepted { .. }     => OrderState::Accepted,
+            DomainEvent::OwnerForceUnavailable { .. }  => OrderState::Unavailable,
+            DomainEvent::OwnerForceClarification { .. }=> OrderState::PendingClarification,
+            DomainEvent::OwnerForceReady { .. }        => OrderState::ReadyForPickup,
+            DomainEvent::OwnerReassignWorker { .. }    => OrderState::Assigned,
             _ => return None,
         })
     }
 
     fn supply_request_state_of(event: &DomainEvent) -> Option<SupplyRequestState> {
         Some(match event {
-            DomainEvent::SupplyRequestSent { .. }   => SupplyRequestState::Sent,
-            DomainEvent::InvoiceReceived { .. }     => SupplyRequestState::InvoiceReceived,
-            DomainEvent::InvoiceApproved { .. }     => SupplyRequestState::OwnerApprovedInvoice,
-            DomainEvent::SupplierConfirmed { .. }   => SupplyRequestState::SupplierConfirmed,
+            DomainEvent::SupplyRequestSent { .. }  => SupplyRequestState::Sent,
+            DomainEvent::InvoiceReceived { .. }    => SupplyRequestState::InvoiceReceived,
+            DomainEvent::InvoiceApproved { .. }    => SupplyRequestState::OwnerApprovedInvoice,
+            DomainEvent::SupplierConfirmed { .. }  => SupplyRequestState::SupplierConfirmed,
             _ => return None,
         })
     }
