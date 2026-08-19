@@ -87,6 +87,44 @@ async fn try_fan_out(
             send_to_identity(state, &identity, text).await;
         }
 
+        DomainEvent::OwnerForceAccepted { worker_id, order_id } => {
+            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
+            let text = format!("✅ Owner has confirmed your order: {desc}");
+            send_to_identity(state, &identity, &text).await;
+        }
+
+        DomainEvent::OwnerForceClarification { worker_id, order_id } => {
+            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
+            let text = format!("❓ Owner has a question about your order: {desc}\nPlease wait for further instructions.");
+            send_to_identity(state, &identity, &text).await;
+        }
+
+        DomainEvent::OwnerForceReady { worker_id, order_id } => {
+            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
+            let text = format!("📦 Owner has marked your order as ready for pickup: {desc}");
+            send_to_identity(state, &identity, &text).await;
+        }
+
+        DomainEvent::OwnerForceUnavailable { worker_id, order_id } => {
+            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
+            let text = format!("ℹ️ Owner has marked you as unavailable for: {desc}");
+            send_to_identity(state, &identity, &text).await;
+        }
+
+        DomainEvent::OwnerReassignWorker { new_worker_id, order_id } => {
+            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let identity = worker_identity(&state.pool, new_worker_id.into_inner()).await?;
+            let text = format!(
+                "📋 You have been reassigned to: {desc}\n\
+                Reply 'รับงาน' (accept) or 'ไม่ว่าง' (unavailable)."
+            );
+            send_to_identity(state, &identity, &text).await;
+        }
+
         _ => {}
     }
 

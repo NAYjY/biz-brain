@@ -118,7 +118,20 @@ pub async fn force_accepted(
     State(state): State<AppState>,
     Json(_req): Json<ForceStateRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let event = DomainEvent::OwnerForceAccepted { order_id: OrderId::new(order_id) };
+    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
+    )
+    .bind(order_id).bind(branch_id)
+    .fetch_optional(&state.pool).await.map_err(internal)?;
+
+    let worker_id = row
+        .and_then(|(id,)| id)
+        .ok_or_else(|| bad_request("no worker assigned to this order"))?;
+
+    let event = DomainEvent::OwnerForceAccepted {
+        worker_id: WorkerId::new(worker_id),
+        order_id: OrderId::new(order_id),
+    };
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
@@ -156,7 +169,21 @@ pub async fn force_clarification(
     State(state): State<AppState>,
     Json(_req): Json<ForceStateRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let event = DomainEvent::OwnerForceClarification { order_id: OrderId::new(order_id) };
+    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
+    )
+    .bind(order_id).bind(branch_id)
+    .fetch_optional(&state.pool).await.map_err(internal)?;
+
+    let worker_id = row
+        .and_then(|(id,)| id)
+        .ok_or_else(|| bad_request("no worker assigned to this order"))?;
+
+    let event = DomainEvent::OwnerForceClarification  {
+        worker_id: WorkerId::new(worker_id),
+        order_id: OrderId::new(order_id),
+    };
+
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
@@ -168,7 +195,21 @@ pub async fn force_ready(
     State(state): State<AppState>,
     Json(_req): Json<ForceStateRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let event = DomainEvent::OwnerForceReady { order_id: OrderId::new(order_id) };
+    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
+    )
+    .bind(order_id).bind(branch_id)
+    .fetch_optional(&state.pool).await.map_err(internal)?;
+
+    let worker_id = row
+        .and_then(|(id,)| id)
+        .ok_or_else(|| bad_request("no worker assigned to this order"))?;
+
+    let event = DomainEvent::OwnerForceReady {
+        worker_id: WorkerId::new(worker_id),
+        order_id: OrderId::new(order_id),
+    };
+
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
@@ -268,6 +309,20 @@ pub async fn edit_description(
             order_id: domain::OrderId::new(order_id),
             branch_id: domain::BranchId::new(bid),
         }).await;
+    }
+
+    // Notify worker if one is assigned
+    if let Ok(Some((worker_id,))) = sqlx::query_as::<_, (Option<Uuid>,)>(
+        "SELECT worker_id FROM order_current_state WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        if let Some(wid) = worker_id {
+            let _ = send_message_to_worker(&state, wid, 
+                &format!("ℹ️ Order description updated: {desc}")).await;
+        }
     }
 
     Ok(StatusCode::NO_CONTENT)

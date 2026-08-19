@@ -66,11 +66,9 @@ impl EventSourcing {
             DomainEvent::OwnerReassignWorker { new_worker_id, .. } => {
                 Some(new_worker_id.into_inner())
             }
-            // Force events that operate on existing worker — no worker_id stored
-            // (the projection worker reads it from the existing state).
-            DomainEvent::OwnerForceAccepted { .. }
-            | DomainEvent::OwnerForceClarification { .. }
-            | DomainEvent::OwnerForceReady { .. }
+            DomainEvent::OwnerForceAccepted { worker_id, .. }
+| DomainEvent::OwnerForceClarification { worker_id, .. }
+| DomainEvent::OwnerForceReady { worker_id, .. } => Some(worker_id.into_inner()),
             // No-worker events
             | DomainEvent::OrderDone { .. }
             | DomainEvent::OwnerCancelled { .. }

@@ -80,10 +80,10 @@ impl OrderEventRepository {
             "order_reset"              => DomainEvent::OrderReset { order_id },
             "clarification_resolved"   => DomainEvent::ClarificationResolved { worker_id: require_worker()?, order_id },
             // P16
-            "owner_force_accepted"     => DomainEvent::OwnerForceAccepted { order_id },
+            "owner_force_accepted"     => DomainEvent::OwnerForceAccepted { worker_id: require_worker()?, order_id },
             "owner_force_unavailable"  => DomainEvent::OwnerForceUnavailable { worker_id: require_worker()?, order_id },
-            "owner_force_clarification"=> DomainEvent::OwnerForceClarification { order_id },
-            "owner_force_ready"        => DomainEvent::OwnerForceReady { order_id },
+            "owner_force_clarification"=> DomainEvent::OwnerForceClarification { worker_id: require_worker()?, order_id },
+            "owner_force_ready"        => DomainEvent::OwnerForceReady { worker_id: require_worker()?, order_id },
             "owner_reassign_worker"    => DomainEvent::OwnerReassignWorker {
                 new_worker_id: require_worker()?,
                 order_id,

@@ -31,13 +31,13 @@ pub enum DomainEvent {
 
     // P16: Owner full-control force-state events.
     /// Owner forces Accepted (Worker verbally confirmed, no message needed).
-    OwnerForceAccepted { order_id: OrderId },
+    OwnerForceAccepted { worker_id: WorkerId, order_id: OrderId },
     /// Owner marks Worker as unavailable for this order.
     OwnerForceUnavailable { worker_id: WorkerId, order_id: OrderId },
     /// Owner manually opens a clarification request.
-    OwnerForceClarification { order_id: OrderId },
+    OwnerForceClarification { worker_id: WorkerId, order_id: OrderId },
     /// Owner marks the order as ready for pickup.
-    OwnerForceReady { order_id: OrderId },
+    OwnerForceReady { worker_id: WorkerId, order_id: OrderId },
     /// Owner swaps the assigned Worker (no cancel+reset cycle required).
     OwnerReassignWorker { new_worker_id: WorkerId, order_id: OrderId },
 
@@ -85,9 +85,9 @@ impl DomainEvent {
             | Self::OwnerCancelled { order_id }
             | Self::OrderReset { order_id }
             | Self::ClarificationResolved { order_id, .. }
-            | Self::OwnerForceAccepted { order_id }
-            | Self::OwnerForceClarification { order_id }
-            | Self::OwnerForceReady { order_id }
+            | Self::OwnerForceAccepted { worker_id: _, order_id }
+            | Self::OwnerForceClarification { worker_id: _, order_id }
+            | Self::OwnerForceReady { worker_id: _, order_id }
             | Self::OwnerForceUnavailable { order_id, .. }
             | Self::OwnerReassignWorker { order_id, .. } => Some(*order_id),
             _ => None,
