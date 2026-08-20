@@ -13,6 +13,7 @@ pub struct OrderView {
     pub description: String,
     pub state: String,
     pub worker_id: Option<Uuid>,
+    pub worker_name: Option<String>,
     pub last_worker_message: Option<String>,
     pub last_worker_message_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -21,25 +22,17 @@ pub async fn list_orders(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<OrderView>>, (StatusCode, String)> {
+    // orders_by_branch already excludes soft-deleted via JOIN orders o + deleted_at IS NULL
     let rows = state.projections.orders_by_branch(branch_id).await.map_err(internal)?;
 
-    // P16: filter out soft-deleted orders
-    let active_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT id FROM orders WHERE branch_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(branch_id)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal)?;
-
     Ok(Json(rows.into_iter()
-        .filter(|r| active_ids.contains(&r.id))
         .map(|r| OrderView {
             id: r.id,
             customer_id: r.customer_id,
             description: r.description,
             state: r.state,
             worker_id: r.worker_id,
+            worker_name: r.worker_name,
             last_worker_message: r.last_worker_message,
             last_worker_message_at: r.last_worker_message_at,
         })

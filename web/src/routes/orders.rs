@@ -1,6 +1,4 @@
 //! D04 / P16: Orders view — SSR initial render.
-//! P16: assign-worker modal now has a dynamic title element for
-//!      dual-purpose assign/reassign; delete button shown for terminal states.
 
 use axum::{
     extract::{Path, State},
@@ -101,7 +99,7 @@ pub async fn render_orders(
   </div>
 </div>
 
-<!-- Assign / Reassign Worker modal (dual-purpose, title set by JS) -->
+<!-- Assign / Reassign Worker modal -->
 <div class="modal-backdrop hidden" id="assign-worker-modal">
   <div class="modal">
     <div class="modal__header">
@@ -140,22 +138,32 @@ pub async fn render_orders(
 fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     let state_lower = o.state.to_lowercase();
 
-    let worker_cell = match o.worker_id {
-        Some(id) => format!(r#"<span class="font-mono text-xs">{}</span>"#, &id.to_string()[..8]),
+    // Show worker name, not ID
+    let worker_cell = match &o.worker_name {
+        Some(name) => html_escape(name),
         None => "—".to_string(),
     };
 
+    // Worker message row — only rendered when there is a message, and it
+    // clearly labels which order it's for via the description.
     let message_row = match &o.last_worker_message {
-        Some(msg) => format!(
-            r#"<tr class="worker-message-row">
+        Some(msg) => {
+            let is_clarif = o.state == "PENDING_CLARIFICATION";
+            let placeholder = if is_clarif {
+                "Reply to resolve clarification…"
+            } else {
+                "Reply to worker…"
+            };
+            format!(
+                r#"<tr class="worker-message-row">
   <td colspan="5">
     <div class="worker-message-bubble">
-      <span class="worker-message-label">Worker said:</span>
+      <span class="worker-message-label">Worker message — {desc}</span>
       <span class="worker-message-text">{msg}</span>
       <div class="worker-reply-box">
         <input class="form-input worker-reply-input"
                type="text"
-               placeholder="Reply to worker…"
+               placeholder="{placeholder}"
                id="reply-{id}">
         <button class="btn btn--primary btn--sm"
                 onclick="BB.sendWorkerReply('{id}', '{state}')">Send</button>
@@ -163,10 +171,13 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     </div>
   </td>
 </tr>"#,
-            msg = html_escape(msg),
-            id = o.id,
-            state = o.state,
-        ),
+                desc = html_escape(&o.description),
+                msg = html_escape(msg),
+                placeholder = placeholder,
+                id = o.id,
+                state = o.state,
+            )
+        }
         None => String::new(),
     };
 
@@ -175,8 +186,8 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
   <td><span class="state-pill state-pill--{state_lower}">{state_display}</span></td>
   <td><span class="order-desc" id="desc-{id}">{desc}</span></td>
   <td class="text-muted font-mono text-xs">{customer}</td>
-  <td class="text-muted text-xs" id="worker-{id}">{worker}</td>
-  <td><div style="display:flex;gap:.5rem;flex-wrap:wrap;" class="order-actions" data-order-id="{id}"></div></td>
+  <td class="text-muted text-sm" id="worker-{id}">{worker}</td>
+  <td><div style="display:flex;gap:.5rem;flex-wrap:wrap;" class="order-gear-wrap" data-order-id="{id}"></div></td>
 </tr>{message_row}"#,
         id = o.id,
         state = o.state,

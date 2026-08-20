@@ -147,22 +147,17 @@ async fn send_to_identity(state: &AppState, identity: &ChannelIdentity, text: &s
 // ── DB helpers ───────────────────────────────────────────────────────────── //
 
 async fn order_description(pool: &PgPool, order_id: Uuid) -> Result<String, sqlx::Error> {
-    // Prefer the most recent description edit; fall back to the original.
-    let edited: Option<String> = sqlx::query_scalar(
-        "SELECT new_description FROM order_description_edits \
-         WHERE order_id = $1 ORDER BY id DESC LIMIT 1",
+    let (desc,): (String,) = sqlx::query_as(
+        "SELECT COALESCE(
+             (SELECT new_description FROM order_description_edits
+              WHERE order_id = $1 ORDER BY id DESC LIMIT 1),
+             description
+         )
+         FROM orders WHERE id = $1",
     )
     .bind(order_id)
-    .fetch_optional(pool)
+    .fetch_one(pool)
     .await?;
-
-    if let Some(d) = edited { return Ok(d); }
-
-    let (desc,): (String,) =
-        sqlx::query_as("SELECT description FROM orders WHERE id = $1")
-            .bind(order_id)
-            .fetch_one(pool)
-            .await?;
     Ok(desc)
 }
 

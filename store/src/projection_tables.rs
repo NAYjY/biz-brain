@@ -13,6 +13,7 @@ pub struct OrderCurrentState {
     pub description: String,
     pub state: String,
     pub worker_id: Option<Uuid>,
+    pub worker_name: Option<String>,
     pub last_worker_message: Option<String>,
     pub last_worker_message_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -34,14 +35,14 @@ impl ProjectionTables {
         Self { pool }
     }
 
-        pub async fn upsert_order_state(
+    pub async fn upsert_order_state(
         &self,
         id: OrderId,
         branch_id: Uuid,
         customer_id: Uuid,
         description: &str,
         state: OrderState,
-        worker_id: Option<uuid::Uuid>,   // <-- NEW param
+        worker_id: Option<uuid::Uuid>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
@@ -50,6 +51,7 @@ impl ProjectionTables {
             VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (order_id) DO UPDATE
                 SET state      = EXCLUDED.state,
+                    description = EXCLUDED.description,
                     worker_id  = COALESCE(EXCLUDED.worker_id, order_current_state.worker_id),
                     updated_at = NOW()
             "#,
@@ -65,7 +67,7 @@ impl ProjectionTables {
         Ok(())
     }
 
-    /// Save the raw text of the last Worker message so Owner can see and reply.
+    /// Save the raw text of the last Worker message on a specific order.
     pub async fn update_worker_message(
         &self,
         order_id: OrderId,
@@ -110,12 +112,29 @@ impl ProjectionTables {
     }
 
     pub async fn orders_by_branch(&self, branch_id: Uuid) -> Result<Vec<OrderCurrentState>, sqlx::Error> {
+        // Pulls latest edited description, joins worker name, excludes soft-deleted.
         sqlx::query_as(
-            "SELECT order_id AS id, branch_id, customer_id, description, state, \
-                    worker_id, last_worker_message, last_worker_message_at \
-             FROM order_current_state \
-             WHERE branch_id = $1 \
-             ORDER BY updated_at DESC",
+            "SELECT
+                ocs.order_id        AS id,
+                ocs.branch_id,
+                ocs.customer_id,
+                -- latest description edit wins, falls back to original
+                COALESCE(
+                    (SELECT new_description FROM order_description_edits
+                     WHERE order_id = ocs.order_id ORDER BY id DESC LIMIT 1),
+                    o.description
+                )                   AS description,
+                ocs.state,
+                ocs.worker_id,
+                w.name              AS worker_name,
+                ocs.last_worker_message,
+                ocs.last_worker_message_at
+             FROM order_current_state ocs
+             JOIN orders o ON o.id = ocs.order_id
+             LEFT JOIN workers w ON w.id = ocs.worker_id
+             WHERE ocs.branch_id = $1
+               AND o.deleted_at IS NULL
+             ORDER BY ocs.updated_at DESC",
         )
         .bind(branch_id)
         .fetch_all(&self.pool)

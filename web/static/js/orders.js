@@ -49,15 +49,15 @@ function initOrdersPage(branchId) {
   function orderRowHtml(o) {
     const pill = BB.statePill(o.state);
     const customerName = BB.escapeHtml(customerMap[o.customer_id] || BB.shortId(o.customer_id));
-    const worker = o.worker_id
-      ? `<span class="font-mono text-xs">${BB.shortId(o.worker_id)}</span>`
+    const worker = o.worker_name
+      ? BB.escapeHtml(o.worker_name)
       : '—';
 
     const messageRow = o.last_worker_message ? `
       <tr class="worker-message-row">
         <td colspan="5">
           <div class="worker-message-bubble">
-            <span class="worker-message-label">Worker said:</span>
+            <span class="worker-message-label">Worker message — ${BB.escapeHtml(o.description)}</span>
             <span class="worker-message-text">${BB.escapeHtml(o.last_worker_message)}</span>
             <div class="worker-reply-box">
               <input class="form-input worker-reply-input" type="text"

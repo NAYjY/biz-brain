@@ -119,13 +119,7 @@ async fn process_worker_message(
         }
     }
 
-    // Save raw message to order projection for Owner visibility.
-    if let Some(&first_order_id) = active_order_ids.first() {
-        let _ = state.projections.update_worker_message(first_order_id, text).await;
-        let signal = state.projection_worker.project_order(first_order_id).await?;
-        state.publish_sse(signal).await;
-    }
-
+ 
     // P14: check disambiguation_pending FIRST.
     if let Some(pending) = disambig_store.find(&sender_key).await? {
         return handle_worker_disambiguation_reply(
@@ -160,19 +154,27 @@ async fn process_worker_message(
             let order_id = resolve_order_id(resolved_order_id, &active_order_ids);
 
             match order_id {
+                // in the right place — after we know which order the message belongs to):
+ 
                 ResolvedOrder::Single(oid) => {
                     disambig_store.delete(&sender_key).await?;
                     let event = agent::construct_worker_event(variant, worker_id, oid);
-
+ 
                     if event.is_terminal_for_worker() {
                         let mut threads = state.threads.lock().await;
                         threads.remove_active_order(sender, oid);
                     }
-
+ 
+                    // Save message against the confirmed order so Owner sees
+                    // it under the right row, not speculatively under the first.
+                    let _ = state.projections.update_worker_message(oid, text).await;
+ 
                     let reply = fetch_reply_template(state, oid, &event).await;
                     send_to_sender(state, sender, &reply).await;
                     history_repo.append(&sender_key, "assistant", &reply).await?;
                     append_order_event(state, event, oid).await?;
+                    // append_order_event already calls project_order + publish_sse,
+                    // so the updated message will be picked up by that projection run.
                 }
                 ResolvedOrder::NeedsDisambiguation(candidates) => {
                     start_worker_disambiguation(
@@ -596,17 +598,15 @@ async fn build_order_contexts(
 ) -> Result<Vec<ActiveOrderContext>, Box<dyn std::error::Error>> {
     let mut out = Vec::with_capacity(order_ids.len());
     for &oid in order_ids {
-        let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT ocs.state, o.description \
-             FROM order_current_state ocs \
-             JOIN orders o ON o.id = ocs.order_id \
-             WHERE ocs.order_id = $1",
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT state FROM order_current_state WHERE order_id = $1",
         )
         .bind(oid.into_inner())
         .fetch_optional(&state.pool)
         .await?;
 
-        if let Some((st, desc)) = row {
+        if let Some((st,)) = row {
+            let desc = order_description(state, oid.into_inner()).await?;
             out.push(ActiveOrderContext { order_id: oid.into_inner(), description: desc, state: st });
         }
     }
@@ -638,9 +638,17 @@ async fn active_supply_request_contexts(
 }
 
 async fn order_description(state: &AppState, id: uuid::Uuid) -> Result<String, sqlx::Error> {
-    let (desc,): (String,) =
-        sqlx::query_as("SELECT description FROM orders WHERE id = $1")
-            .bind(id).fetch_one(&state.pool).await?;
+    let (desc,): (String,) = sqlx::query_as(
+        "SELECT COALESCE(
+             (SELECT new_description FROM order_description_edits
+              WHERE order_id = $1 ORDER BY id DESC LIMIT 1),
+             description
+         )
+         FROM orders WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await?;
     Ok(desc)
 }
 
