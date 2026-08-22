@@ -1,15 +1,17 @@
 /**
- * D04 / P04 / P16: Orders page — full Owner control.
+ * D04 / P04 / P16 / F04: Orders page — full Owner control.
  *
- * UX: one ⚙️ gear button per row opens a popover menu.
- *     Standard actions (Assign, Cancel, etc.) appear at the top.
- *     Force-state and Edit live inside the same menu — no extra row clutter.
+ * F04 changes:
+ *  - Inline worker-message bubble removed
+ *  - Thread button (💬 + unread badge) per row opens conversation modal
+ *  - AI low-confidence badge (🤖?) on rows where routing was uncertain
+ *  - Orders refresh uses last_event_at sort (server-side, no client change needed)
  */
 
 function initOrdersPage(branchId) {
   const api = (path, opts) => BB.apiFetch(`/api/v1/branches/${branchId}${path}`, opts);
 
-  let pendingAssignOrderId  = null;
+  let pendingAssignOrderId   = null;
   let pendingReassignOrderId = null;
   let customerMap = {};
 
@@ -19,10 +21,9 @@ function initOrdersPage(branchId) {
   loadCustomers();
   loadWorkers();
 
-  // Close any open gear menu when clicking elsewhere
   document.addEventListener('click', closeAllMenus);
 
-  // ── SSE wiring (D06) ─────────────────────────────────────────────── //
+  // ── SSE wiring ───────────────────────────────────────────────────── //
 
   new BranchEventSource(branchId)
     .withBadge(document.getElementById('live-badge'))
@@ -47,50 +48,165 @@ function initOrdersPage(branchId) {
   }
 
   function orderRowHtml(o) {
-    const pill = BB.statePill(o.state);
-    const customerName = BB.escapeHtml(customerMap[o.customer_id] || BB.shortId(o.customer_id));
-    const worker = o.worker_name
-      ? BB.escapeHtml(o.worker_name)
-      : '—';
+    const pill    = BB.statePill(o.state);
+    const customer = BB.escapeHtml(customerMap[o.customer_id] || BB.shortId(o.customer_id));
+    const worker  = o.worker_name ? BB.escapeHtml(o.worker_name) : '—';
 
-    const messageRow = o.last_worker_message ? `
-      <tr class="worker-message-row">
-        <td colspan="5">
-          <div class="worker-message-bubble">
-            <span class="worker-message-label">Worker message — ${BB.escapeHtml(o.description)}</span>
-            <span class="worker-message-text">${BB.escapeHtml(o.last_worker_message)}</span>
-            <div class="worker-reply-box">
-              <input class="form-input worker-reply-input" type="text"
-                     placeholder="${o.state === 'PENDING_CLARIFICATION' ? 'Reply to resolve clarification…' : 'Reply to worker…'}"
-                     id="reply-${o.id}">
-              <button class="btn btn--primary btn--sm"
-                      onclick="sendWorkerReply('${o.id}', '${o.state}')">Send</button>
-            </div>
-          </div>
-        </td>
-      </tr>` : '';
+    // F04: thread button — show only when a worker is assigned.
+    let threadBtn = '';
+    if (o.worker_id) {
+      const unread = o.unread_message_count || 0;
+      const badge  = unread > 0
+        ? ` <span class="thread-unread-badge">${unread}</span>`
+        : '';
+      threadBtn = `<button class="thread-btn"
+          data-order-id="${o.id}" data-unread="${unread}"
+          title="View conversation thread">💬${badge}</button>`;
+    }
+
+    // F04: AI low-confidence badge.
+    const aiBadge = o.ai_routed_low_confidence
+      ? `<span class="ai-badge" title="AI-routed with low confidence — review recommended">🤖?</span>`
+      : '';
 
     return `
       <tr data-order-id="${o.id}" data-state="${o.state}">
         <td>${pill}</td>
         <td><span class="order-desc" id="desc-${o.id}">${BB.escapeHtml(o.description)}</span></td>
-        <td class="text-muted text-sm">${customerName}</td>
+        <td class="text-muted text-sm">${customer}</td>
         <td class="text-muted text-xs" id="worker-${o.id}">${worker}</td>
         <td>
-          <div class="order-gear-wrap" data-order-id="${o.id}" style="position:relative;display:inline-block;"></div>
+          <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+            ${threadBtn}${aiBadge}
+            <div class="order-gear-wrap" data-order-id="${o.id}"
+                 style="position:relative;display:inline-block;"></div>
+          </div>
         </td>
-      </tr>${messageRow}`;
+      </tr>`;
   }
 
   function attachRowActions() {
     document.querySelectorAll('.order-gear-wrap').forEach(renderGearButton);
+    // F04: wire thread buttons.
+    document.querySelectorAll('.thread-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const orderId = btn.dataset.orderId;
+        const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
+        const desc = row?.querySelector('.order-desc')?.textContent ?? orderId;
+        openThreadModal(orderId, desc);
+      });
+    });
+  }
+
+  // ── F04: Thread modal ────────────────────────────────────────────── //
+
+  async function openThreadModal(orderId, orderDesc) {
+    let messages = [];
+    try {
+      // GET /thread also resets unread count server-side.
+      messages = await api(`/orders/${orderId}/thread`);
+    } catch (e) {
+      BB.showToast(`Could not load thread: ${e.message}`, 'error');
+      return;
+    }
+
+    // Clear badge on the row immediately (server already cleared the DB row).
+    const threadBtn = document.querySelector(`.thread-btn[data-order-id="${orderId}"]`);
+    if (threadBtn) {
+      threadBtn.dataset.unread = '0';
+      threadBtn.innerHTML = '💬';
+      threadBtn.style.borderColor = '';
+      threadBtn.style.color = '';
+    }
+    // Also clear AI badge if present.
+    const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
+    row?.querySelector('.ai-badge')?.remove();
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal" style="width:520px;max-height:85vh;display:flex;flex-direction:column;">
+        <div class="modal__header">
+          <span class="modal__title">💬 ${BB.escapeHtml(orderDesc)}</span>
+          <button class="btn btn--ghost btn--sm" data-action="close">✕</button>
+        </div>
+        <div class="thread-body" id="thread-msg-body" style="flex:1;padding:var(--space-4);">
+          ${messages.length === 0
+            ? '<p class="text-muted text-sm">No messages yet.</p>'
+            : messages.map(threadBubble).join('')}
+        </div>
+        <div class="modal__footer" style="flex-direction:column;gap:var(--space-2);align-items:stretch;
+                                          border-top:1px solid var(--color-border);padding-top:var(--space-4);">
+          <textarea class="form-textarea" id="thread-reply-input"
+                    placeholder="Reply to worker…"
+                    style="min-height:64px;resize:vertical;"></textarea>
+          <div style="display:flex;justify-content:flex-end;gap:.5rem;">
+            <button class="btn btn--ghost" data-action="close">Cancel</button>
+            <button class="btn btn--primary" data-action="send">Send</button>
+          </div>
+        </div>
+      </div>`;
+
+    document.body.appendChild(backdrop);
+
+    // Scroll thread to bottom.
+    const body = backdrop.querySelector('#thread-msg-body');
+    body.scrollTop = body.scrollHeight;
+
+    // Focus reply box.
+    backdrop.querySelector('#thread-reply-input')?.focus();
+
+    backdrop.addEventListener('click', async (e) => {
+      const action = e.target.closest('[data-action]')?.dataset.action;
+      if (!action) return;
+      if (action === 'close') { backdrop.remove(); return; }
+      if (action === 'send') {
+        const input = backdrop.querySelector('#thread-reply-input');
+        const text  = input?.value.trim();
+        if (!text) return;
+
+        const sendBtn = backdrop.querySelector('[data-action="send"]');
+        sendBtn.disabled = true;
+        sendBtn.textContent = 'Sending…';
+
+        try {
+          await api(`/orders/${orderId}/message-worker`, {
+            method: 'POST',
+            body: JSON.stringify({ text }),
+          });
+          backdrop.remove();
+          BB.showToast('Message sent ✓', 'success');
+        } catch (err) {
+          sendBtn.disabled = false;
+          sendBtn.textContent = 'Send';
+          BB.showToast(`Send failed: ${err.message}`, 'error');
+        }
+      }
+    });
+
+    // Allow Esc to close.
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') { backdrop.remove(); document.removeEventListener('keydown', onKeyDown); }
+    };
+    document.addEventListener('keydown', onKeyDown);
+  }
+
+  function threadBubble(msg) {
+    const isWorker = msg.role === 'user';
+    const cls      = isWorker ? 'worker' : 'owner';
+    const label    = isWorker ? 'Worker' : 'Bot / Owner';
+    const time     = new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return `
+      <div class="thread-bubble thread-bubble--${cls}">
+        <div class="thread-bubble__body">${BB.escapeHtml(msg.content)}</div>
+        <span class="thread-bubble__meta">${label} · ${time}</span>
+      </div>`;
   }
 
   // ── Gear button + menu ───────────────────────────────────────────── //
 
   function renderGearButton(wrap) {
     wrap.innerHTML = '';
-
     const btn = document.createElement('button');
     btn.className = 'btn btn--ghost btn--sm';
     btn.title = 'Order actions';
@@ -102,26 +218,25 @@ function initOrdersPage(branchId) {
       closeAllMenus();
       if (!alreadyOpen) openGearMenu(wrap);
     });
-
     wrap.appendChild(btn);
   }
 
   function openGearMenu(wrap) {
-    const orderId = wrap.dataset.orderId;
-    const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
-    const stateEl = row?.querySelector('.state-pill');
-    const state = stateEl?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
+    const orderId  = wrap.dataset.orderId;
+    const row      = document.querySelector(`tr[data-order-id="${orderId}"]`);
+    const stateEl  = row?.querySelector('.state-pill');
+    const state    = stateEl?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
 
-    const done      = state === 'DONE';
-    const cancelled = state === 'CANCELLED';
-    const unassigned= state === 'UNASSIGNED';
-    const unavail   = state === 'UNAVAILABLE';
-    const assigned  = state === 'ASSIGNED';
-    const accepted  = state === 'ACCEPTED';
-    const clarif    = state === 'PENDING_CLARIFICATION';
-    const ready     = state === 'READY_FOR_PICKUP';
-    const active    = assigned || accepted || clarif || ready;
-    const terminal  = done;
+    const done       = state === 'DONE';
+    const cancelled  = state === 'CANCELLED';
+    const unassigned = state === 'UNASSIGNED';
+    const unavail    = state === 'UNAVAILABLE';
+    const assigned   = state === 'ASSIGNED';
+    const accepted   = state === 'ACCEPTED';
+    const clarif     = state === 'PENDING_CLARIFICATION';
+    const ready      = state === 'READY_FOR_PICKUP';
+    const active     = assigned || accepted || clarif || ready;
+    const terminal   = done;
 
     const menu = document.createElement('div');
     menu.className = 'gear-menu';
@@ -133,52 +248,43 @@ function initOrdersPage(branchId) {
       'padding:.25rem 0;',
     ].join('');
 
-    // ── Standard actions ─────────────────────────────────────────── //
-
     if (unassigned || unavail || cancelled) {
-      addItem(menu, '👤 Assign worker',    'normal', () => openAssignWorker(orderId));
+      addItem(menu, '👤 Assign worker',     'normal', () => openAssignWorker(orderId));
     }
     if (active) {
-      addItem(menu, '🔄 Reassign worker',  'normal', () => openReassignWorker(orderId));
+      addItem(menu, '🔄 Reassign worker',   'normal', () => openReassignWorker(orderId));
     }
     if (active || ready) {
-      addItem(menu, '✅ Close (mark Done)', 'normal', () => closeOrder(orderId));
+      addItem(menu, '✅ Close (mark Done)',  'normal', () => closeOrder(orderId));
     }
     if (!done && !cancelled) {
-      addItem(menu, '❌ Cancel order',     'danger', () => cancelOrder(orderId));
+      addItem(menu, '❌ Cancel order',      'danger', () => cancelOrder(orderId));
     }
     if (cancelled || unavail) {
       addItem(menu, '↩ Reset to Unassigned','normal', () => resetOrder(orderId));
     }
     if (clarif) {
-      // Quick "send message to worker" shortcut visible here
-      addItem(menu, '💬 Reply to worker…', 'normal', () => {
-        const input = document.getElementById(`reply-${orderId}`);
-        input?.focus();
+      addItem(menu, '💬 Reply to worker…',  'normal', () => {
+        // Open thread modal as the canonical reply path (F04).
+        const desc = row?.querySelector('.order-desc')?.textContent ?? orderId;
+        openThreadModal(orderId, desc);
       });
     }
 
-    // ── Divider before force/edit ─────────────────────────────────── //
     if (!terminal) addDivider(menu);
-
-    // ── Edit description ─────────────────────────────────────────── //
     if (!terminal) {
-      addItem(menu, '✏️ Edit description', 'normal', () => editDescription(orderId));
+      addItem(menu, '✏️ Edit description',  'normal', () => editDescription(orderId));
     }
-
-    // ── Force-state ──────────────────────────────────────────────── //
     if (!terminal) {
       addSectionLabel(menu, 'Force state (bypass messaging)');
-      addItem(menu, '→ Force Accepted',      'warn', () => forceState(orderId, 'force-accepted'));
-      addItem(menu, '→ Force Unavailable',   'warn', () => forceState(orderId, 'force-unavailable'));
-      addItem(menu, '→ Force Clarification', 'warn', () => forceState(orderId, 'force-clarification'));
-      addItem(menu, '→ Force Ready',         'warn', () => forceState(orderId, 'force-ready'));
+      addItem(menu, '→ Force Accepted',       'warn', () => forceState(orderId, 'force-accepted'));
+      addItem(menu, '→ Force Unavailable',    'warn', () => forceState(orderId, 'force-unavailable'));
+      addItem(menu, '→ Force Clarification',  'warn', () => forceState(orderId, 'force-clarification'));
+      addItem(menu, '→ Force Ready',          'warn', () => forceState(orderId, 'force-ready'));
     }
-
-    // ── Delete ───────────────────────────────────────────────────── //
     if (done || cancelled || unassigned || unavail) {
       addDivider(menu);
-      addItem(menu, '🗑 Delete order', 'danger', () => deleteOrder(orderId));
+      addItem(menu, '🗑 Delete order',       'danger', () => deleteOrder(orderId));
     }
 
     wrap.appendChild(menu);
@@ -222,31 +328,6 @@ function initOrdersPage(branchId) {
     document.querySelectorAll('.gear-menu').forEach(m => m.remove());
   }
 
-  // ── Worker reply / P04 resolve clarification ─────────────────────── //
-
-  window.sendWorkerReply = async (orderId, orderState) => {
-    const input = document.getElementById(`reply-${orderId}`);
-    const text = input?.value.trim();
-    if (!text) { BB.showToast('Type a message first', 'error'); return; }
-
-    const isClarification = orderState === 'PENDING_CLARIFICATION';
-    const endpoint = isClarification
-      ? `/orders/${orderId}/resolve-clarification`
-      : `/orders/${orderId}/message-worker`;
-
-    try {
-      await api(endpoint, {
-        method: 'POST',
-        body: JSON.stringify(isClarification ? { message: text } : { text }),
-      });
-      input.value = '';
-      BB.showToast(isClarification ? 'Clarification resolved ✓' : 'Message sent ✓', 'success');
-    } catch (e) {
-      BB.showToast(`Send failed: ${e.message}`, 'error');
-    }
-  };
-  BB.sendWorkerReply = window.sendWorkerReply;
-
   // ── Create Order ─────────────────────────────────────────────────── //
 
   document.getElementById('new-customer-btn').addEventListener('click', () => {
@@ -262,7 +343,7 @@ function initOrdersPage(branchId) {
     if (!description) { BB.showToast('Description required', 'error'); return; }
 
     let customerId = customerEl.value;
-    const newName = newNameEl.value.trim();
+    const newName  = newNameEl.value.trim();
     if (newName) {
       try {
         const c = await api('/customers', { method: 'POST', body: JSON.stringify({ name: newName }) });
@@ -288,10 +369,10 @@ function initOrdersPage(branchId) {
     }
   });
 
-  // ── Assign Worker ────────────────────────────────────────────────── //
+  // ── Assign / Reassign ────────────────────────────────────────────── //
 
   function openAssignWorker(orderId) {
-    pendingAssignOrderId  = orderId;
+    pendingAssignOrderId   = orderId;
     pendingReassignOrderId = null;
     document.getElementById('assign-worker-modal-title').textContent = 'Assign Worker';
     BB.openModal('assign-worker-modal');
@@ -299,7 +380,7 @@ function initOrdersPage(branchId) {
 
   function openReassignWorker(orderId) {
     pendingReassignOrderId = orderId;
-    pendingAssignOrderId  = null;
+    pendingAssignOrderId   = null;
     document.getElementById('assign-worker-modal-title').textContent = 'Reassign Worker';
     BB.openModal('assign-worker-modal');
   }
@@ -462,8 +543,6 @@ function initOrdersPage(branchId) {
     try {
       await api(`/orders/${orderId}`, { method: 'DELETE' });
       const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
-      const msgRow = row?.nextElementSibling;
-      if (msgRow?.classList.contains('worker-message-row')) msgRow.remove();
       row?.remove();
       maybeShowEmpty();
       BB.showToast('Order deleted', 'success');

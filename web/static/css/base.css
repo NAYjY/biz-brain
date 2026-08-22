@@ -21,6 +21,8 @@
   --color-state-err-bg: #321815;
   --color-state-warn:   #C49A3C;
   --color-state-warn-bg:#312510;
+  --color-state-ongoing:#C4853C;
+  --color-state-ongoing-bg:#17311F;
   --color-state-neutral:#5A7098;
   --color-state-neutral-bg:#1A2332;
 
@@ -213,9 +215,10 @@ a:hover { text-decoration: underline; }
 .state-pill--unavailable { background: var(--color-state-err-bg); color: var(--color-state-err); }
 
 .state-pill--assigned,
-.state-pill--accepted,
 .state-pill--invoice_received,
 .state-pill--owner_approved_invoice { background: var(--color-state-warn-bg); color: var(--color-state-warn); }
+
+.state-pill--accepted { background: var(--color-state-ongoing-bg); color: var(--color-state-ongoing); }
 
 .state-pill--unassigned,
 .state-pill--draft,
@@ -536,4 +539,112 @@ a:hover { text-decoration: underline; }
 
 .worker-reply-input {
   flex: 1;
+}
+/* ── F04: Thread button ─────────────────────────────────────────────────── */
+
+.thread-btn {
+  position: relative;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-family: var(--font-body);
+  color: var(--color-text-muted);
+  transition: background .15s, border-color .15s, color .15s;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+
+.thread-btn:hover {
+  background: var(--color-surface);
+  border-color: var(--color-accent-dim);
+  color: var(--color-text);
+}
+
+/* Highlight when there are unread messages */
+.thread-btn[data-unread]:not([data-unread="0"]) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.thread-unread-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ── F04: AI low-confidence badge ──────────────────────────────────────── */
+
+.ai-badge {
+  font-size: var(--text-xs);
+  color: var(--color-state-warn);
+  cursor: help;
+  user-select: none;
+}
+
+/* ── F04: Thread modal bubbles ─────────────────────────────────────────── */
+
+.thread-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow-y: auto;
+  max-height: 50vh;
+  padding: var(--space-2) 0;
+}
+
+.thread-bubble {
+  display: flex;
+  flex-direction: column;
+  max-width: 80%;
+}
+
+.thread-bubble--worker {
+  align-self: flex-start;
+}
+
+.thread-bubble--owner {
+  align-self: flex-end;
+}
+
+.thread-bubble__body {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thread-bubble--worker .thread-bubble__body {
+  background: var(--color-surface-2);
+}
+
+.thread-bubble--owner .thread-bubble__body {
+  background: var(--color-accent-dim);
+}
+
+.thread-bubble__meta {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  margin-top: 3px;
+  padding: 0 2px;
+}
+
+.thread-bubble--owner .thread-bubble__meta {
+  text-align: right;
 }

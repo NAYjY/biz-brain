@@ -1,4 +1,5 @@
-//! D04 / P16: Orders view — SSR initial render.
+//! D04 / P16 / F04: Orders view — SSR initial render.
+//! F04: inline worker-message bubble removed; thread button with unread badge added.
 
 use axum::{
     extract::{Path, State},
@@ -10,7 +11,7 @@ use uuid::Uuid;
 use api::AppState;
 
 use crate::auth::{auth_error_response, authorize_branch};
-use crate::templates::{shell_open, shell_close, topbar_html, page_not_found};
+use crate::templates::{page_not_found, shell_close, shell_open, topbar_html};
 
 pub async fn render_orders(
     Path(branch_id): Path<Uuid>,
@@ -26,17 +27,19 @@ pub async fn render_orders(
         Ok(rows) => rows,
         Err(e) => {
             eprintln!("orders query failed: {e:?}");
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "DB error").into_response();
+            return page_not_found();
         }
     };
 
     let orders_rows_html = if orders.is_empty() {
-        r#"<tr><td colspan="5" class="data-table__empty">No orders yet. Create one to get started.</td></tr>"#.to_string()
+        r#"<tr><td colspan="5" class="data-table__empty">No orders yet. Create one to get started.</td></tr>"#
+            .to_string()
     } else {
         orders.iter().map(order_row_html).collect::<Vec<_>>().join("\n")
     };
 
-    let html = format!(r#"{}
+    let html = format!(
+        r#"{}
 {topbar}
 <div class="page">
   <div class="page-header">
@@ -138,57 +141,50 @@ pub async fn render_orders(
 fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     let state_lower = o.state.to_lowercase();
 
-    // Show worker name, not ID
     let worker_cell = match &o.worker_name {
         Some(name) => html_escape(name),
         None => "—".to_string(),
     };
 
-    // Worker message row — only rendered when there is a message, and it
-    // clearly labels which order it's for via the description.
-    let message_row = match &o.last_worker_message {
-        Some(msg) => {
-            let is_clarif = o.state == "PENDING_CLARIFICATION";
-            let placeholder = if is_clarif {
-                "Reply to resolve clarification…"
-            } else {
-                "Reply to worker…"
-            };
-            format!(
-                r#"<tr class="worker-message-row">
-  <td colspan="5">
-    <div class="worker-message-bubble">
-      <span class="worker-message-label">Worker message — {desc}</span>
-      <span class="worker-message-text">{msg}</span>
-      <div class="worker-reply-box">
-        <input class="form-input worker-reply-input"
-               type="text"
-               placeholder="{placeholder}"
-               id="reply-{id}">
-        <button class="btn btn--primary btn--sm"
-                onclick="BB.sendWorkerReply('{id}', '{state}')">Send</button>
-      </div>
-    </div>
-  </td>
-</tr>"#,
-                desc = html_escape(&o.description),
-                msg = html_escape(msg),
-                placeholder = placeholder,
-                id = o.id,
-                state = o.state,
-            )
-        }
-        None => String::new(),
+    // F04: thread button — only when a worker is assigned (has something to chat about).
+    let thread_btn = if o.worker_id.is_some() {
+        let unread = o.unread_message_count;
+        let badge = if unread > 0 {
+            format!(" <span class=\"thread-unread-badge\">{unread}</span>")
+        } else {
+            String::new()
+        };
+        format!(
+            r#"<button class="thread-btn" data-order-id="{id}" data-unread="{unread}"
+                      title="View conversation thread">💬{badge}</button>"#,
+            id = o.id,
+            unread = unread,
+        )
+    } else {
+        String::new()
+    };
+
+    // F04: AI low-confidence badge.
+    let ai_badge = if o.ai_routed_low_confidence {
+        r#"<span class="ai-badge" title="AI-routed with low confidence — review recommended">🤖?</span>"#
+            .to_string()
+    } else {
+        String::new()
     };
 
     format!(
         r#"<tr data-order-id="{id}" data-state="{state}">
   <td><span class="state-pill state-pill--{state_lower}">{state_display}</span></td>
   <td><span class="order-desc" id="desc-{id}">{desc}</span></td>
-  <td class="text-muted font-mono text-xs">{customer}</td>
+  <td class="text-muted text-xs">{customer}</td>
   <td class="text-muted text-sm" id="worker-{id}">{worker}</td>
-  <td><div style="display:flex;gap:.5rem;flex-wrap:wrap;" class="order-gear-wrap" data-order-id="{id}"></div></td>
-</tr>{message_row}"#,
+  <td>
+    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+      {thread_btn}{ai_badge}
+      <div class="order-gear-wrap" data-order-id="{id}" style="position:relative;display:inline-block;"></div>
+    </div>
+  </td>
+</tr>"#,
         id = o.id,
         state = o.state,
         state_lower = state_lower,
@@ -196,7 +192,8 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
         desc = html_escape(&o.description),
         customer = &o.customer_id.to_string()[..8],
         worker = worker_cell,
-        message_row = message_row,
+        thread_btn = thread_btn,
+        ai_badge = ai_badge,
     )
 }
 

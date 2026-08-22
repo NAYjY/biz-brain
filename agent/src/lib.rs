@@ -4,6 +4,7 @@
 //! P01: prompt harness, Thai/English few-shot, structured output validation.
 //! P13: conversation history window, `{ variant, order_id }` output.
 //! P06: SupplierConfirmed in prefilter and classifier.
+//! F04: `prefilter_hit()` exposed so inbox_worker can flag low-confidence routing.
 
 #![warn(clippy::all)]
 
@@ -30,11 +31,13 @@ impl WorkerAgent {
         Self { prefilter: Prefilter::worker_events(), classifier }
     }
 
+    /// Returns `true` if the prefilter matched (no Claude call was needed).
+    /// F04: used by inbox_worker to decide whether to set ai_routed_low_confidence.
+    pub fn prefilter_hit(&self, message: &str) -> bool {
+        self.prefilter.classify(message).is_some()
+    }
+
     /// Attempt prefilter first; fall through to Claude classify on miss.
-    ///
-    /// Returns `Ok(Some((variant, order_id)))` on success,
-    /// `Ok(None)` when unrecognized,
-    /// `Err` on API/parse/unexpected-variant failure (triggers Owner alert).
     pub async fn classify(
         &self,
         message: &str,
@@ -57,6 +60,10 @@ pub struct SupplierAgent {
 impl SupplierAgent {
     pub fn new(classifier: ClaudeClassifier) -> Self {
         Self { prefilter: Prefilter::supplier_events(), classifier }
+    }
+
+    pub fn prefilter_hit(&self, message: &str) -> bool {
+        self.prefilter.classify(message).is_some()
     }
 
     pub async fn classify(

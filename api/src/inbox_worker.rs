@@ -14,6 +14,8 @@
 //!   4. P05: if message carries media_id, fetch + store bytes on invoice row
 //!
 //! P07: terminal events remove the order from ThreadContextStore.
+//! F04: increment_unread on every inbound worker message; flag_low_confidence
+//!      when prefilter misses and Claude routes with low certainty.
 
 use std::time::Duration;
 
@@ -30,7 +32,6 @@ use store::reply_templates::ReplyTemplateRepository;
 
 use crate::{event_handler, state::AppState};
 
-// Convert a store HistoryRow into the agent's HistoryMessage type.
 fn to_history_msg(row: store::HistoryRow) -> agent::classify::HistoryMessage {
     agent::classify::HistoryMessage { role: row.role, content: row.content }
 }
@@ -101,7 +102,6 @@ async fn process_worker_message(
     let history_repo = ConversationHistoryRepository::new(state.pool.clone());
     let disambig_store = DisambiguationStore::new(state.pool.clone());
 
-    // Load history and active orders.
     let history_rows = history_repo.load(&sender_key).await?;
     let history: Vec<agent::classify::HistoryMessage> =
         history_rows.into_iter().map(to_history_msg).collect();
@@ -119,7 +119,6 @@ async fn process_worker_message(
         }
     }
 
- 
     // P14: check disambiguation_pending FIRST.
     if let Some(pending) = disambig_store.find(&sender_key).await? {
         return handle_worker_disambiguation_reply(
@@ -131,6 +130,9 @@ async fn process_worker_message(
 
     // P13/P14: classify with history + order contexts.
     let active_contexts = build_order_contexts(state, &active_order_ids).await?;
+
+    // Track whether we fell through to the Claude classifier (prefilter miss).
+    let prefilter_hit = state.worker_agent.prefilter_hit(text);
     let classify_result = state.worker_agent.classify(text, &history, &active_contexts).await;
 
     match classify_result {
@@ -154,27 +156,31 @@ async fn process_worker_message(
             let order_id = resolve_order_id(resolved_order_id, &active_order_ids);
 
             match order_id {
-                // in the right place — after we know which order the message belongs to):
- 
                 ResolvedOrder::Single(oid) => {
                     disambig_store.delete(&sender_key).await?;
                     let event = agent::construct_worker_event(variant, worker_id, oid);
- 
+
                     if event.is_terminal_for_worker() {
                         let mut threads = state.threads.lock().await;
                         threads.remove_active_order(sender, oid);
                     }
- 
-                    // Save message against the confirmed order so Owner sees
-                    // it under the right row, not speculatively under the first.
+
+                    // Save message against the confirmed order so Owner sees it under the right row.
                     let _ = state.projections.update_worker_message(oid, text).await;
- 
+
+                    // F04: increment unread count so thread button badge updates.
+                    let _ = state.projections.increment_unread(oid).await;
+
+                    // F04: flag low confidence if we had to use Claude (prefilter miss)
+                    // AND the order_id came from Claude rather than being unambiguous.
+                    if !prefilter_hit && resolved_order_id.is_some() {
+                        let _ = state.projections.flag_low_confidence(oid).await;
+                    }
+
                     let reply = fetch_reply_template(state, oid, &event).await;
                     send_to_sender(state, sender, &reply).await;
                     history_repo.append(&sender_key, "assistant", &reply).await?;
                     append_order_event(state, event, oid).await?;
-                    // append_order_event already calls project_order + publish_sse,
-                    // so the updated message will be picked up by that projection run.
                 }
                 ResolvedOrder::NeedsDisambiguation(candidates) => {
                     start_worker_disambiguation(
@@ -203,8 +209,6 @@ async fn handle_worker_disambiguation_reply(
     disambig_store: &DisambiguationStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !is_affirmative(reply_text) && !is_negative(reply_text) {
-        // Not a clear yes/no — drop the pending row and let the next
-        // message go through classify-first as a fresh message.
         disambig_store.delete(sender_key).await?;
         send_to_sender(state, sender,
             "I'm not sure — please reply Yes or No. Which order is this about?").await;
@@ -235,7 +239,7 @@ async fn handle_worker_disambiguation_reply(
         return Ok(());
     }
 
-    // is_yes — confirm and re-classify original text on the pinned order.
+    // Affirmative — confirm and re-classify original text on the pinned order.
     let confirmed_id = match pending.current_candidate() {
         Some(id) => OrderId::new(id),
         None => { disambig_store.delete(sender_key).await?; return Ok(()); }
@@ -264,6 +268,10 @@ async fn handle_worker_disambiguation_reply(
         let mut threads = state.threads.lock().await;
         threads.remove_active_order(sender, confirmed_id);
     }
+
+    let _ = state.projections.update_worker_message(confirmed_id, &pending.original_text).await;
+    // F04: increment unread on the confirmed order (disambiguation was about this message).
+    let _ = state.projections.increment_unread(confirmed_id).await;
 
     let reply = fetch_reply_template(state, confirmed_id, &event).await;
     send_to_sender(state, sender, &reply).await;
@@ -317,7 +325,6 @@ async fn process_supplier_message(
 
     history_repo.append(&sender_key, "user", text).await?;
 
-    // P14 Supplier: check disambiguation_pending FIRST.
     if let Some(pending) = disambig_store.find(&sender_key).await? {
         return handle_supplier_disambiguation_reply(
             state, sender, supplier_id, &sender_key, text,
@@ -547,13 +554,17 @@ fn resolve_supply_request(
 }
 
 fn is_affirmative(text: &str) -> bool {
-    matches!(text.trim().to_lowercase().as_str(),
-        "yes" | "y" | "ใช่" | "ใช่ครับ" | "ใช่ค่ะ" | "ok" | "โอเค" | "correct" | "right")
+    matches!(
+        text.trim().to_lowercase().as_str(),
+        "yes" | "y" | "ใช่" | "ใช่ครับ" | "ใช่ค่ะ" | "ok" | "โอเค" | "correct" | "right"
+    )
 }
 
 fn is_negative(text: &str) -> bool {
-    matches!(text.trim().to_lowercase().as_str(),
-        "no" | "n" | "ไม่" | "ไม่ใช่" | "ไม่ครับ" | "ไม่ค่ะ" | "nope" | "wrong")
+    matches!(
+        text.trim().to_lowercase().as_str(),
+        "no" | "n" | "ไม่" | "ไม่ใช่" | "ไม่ครับ" | "ไม่ค่ะ" | "nope" | "wrong"
+    )
 }
 
 // ── Send helpers ─────────────────────────────────────────────────────────── //
@@ -571,18 +582,18 @@ async fn send_to_sender(state: &AppState, sender: &ChannelIdentity, text: &str) 
 
 async fn fetch_reply_template(state: &AppState, order_id: OrderId, event: &DomainEvent) -> String {
     let event_type = event.variant().as_sql();
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT branch_id FROM orders WHERE id = $1",
-    )
-    .bind(order_id.into_inner())
-    .fetch_optional(&state.pool)
-    .await
-    .ok()
-    .flatten();
+    let row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
+            .bind(order_id.into_inner())
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten();
 
     if let Some((bid,)) = row {
         if let Ok(tmpl) = ReplyTemplateRepository::new(state.pool.clone())
-            .fetch(bid, event_type).await
+            .fetch(bid, event_type)
+            .await
         {
             return tmpl;
         }
@@ -655,14 +666,18 @@ async fn order_description(state: &AppState, id: uuid::Uuid) -> Result<String, s
 async fn supply_request_description(state: &AppState, id: uuid::Uuid) -> Result<String, sqlx::Error> {
     let (desc,): (String,) =
         sqlx::query_as("SELECT description FROM supply_requests WHERE id = $1")
-            .bind(id).fetch_one(&state.pool).await?;
+            .bind(id)
+            .fetch_one(&state.pool)
+            .await?;
     Ok(desc)
 }
 
 async fn branch_for_supply_request(state: &AppState, id: uuid::Uuid) -> Result<uuid::Uuid, sqlx::Error> {
     let (bid,): (uuid::Uuid,) =
         sqlx::query_as("SELECT branch_id FROM supply_requests WHERE id = $1")
-            .bind(id).fetch_one(&state.pool).await?;
+            .bind(id)
+            .fetch_one(&state.pool)
+            .await?;
     Ok(bid)
 }
 
@@ -750,7 +765,8 @@ async fn append_supply_request_event(
     event: DomainEvent,
     branch_id: BranchId,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sr_id = event.supply_request_id()
+    let sr_id = event
+        .supply_request_id()
         .expect("Supplier-agent events always carry supply_request_id");
     let seq = state.supply_request_events.current_sequence(sr_id).await?;
     state.event_sourcing.append(branch_id, seq + 1, &event).await?;

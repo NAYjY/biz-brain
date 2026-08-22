@@ -8,6 +8,8 @@
 //! for the branch ownership check — combining it with a *second* Path
 //! extractor of a *different* type is fine because Axum de-duplicates by
 //! type, but we must not use `Path<HashMap>` twice.
+//!
+//! F04: message_worker and resolve_clarification clear unread count on reply.
 
 use axum::{
     extract::{Path, State},
@@ -111,7 +113,6 @@ pub struct ForceStateRequest {
 }
 
 /// POST /branches/:branch_id/orders/:order_id/force-accepted
-/// Owner forces the order to Accepted without waiting for Worker to reply.
 pub async fn force_accepted(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
@@ -121,8 +122,11 @@ pub async fn force_accepted(
     let row: Option<(Option<Uuid>,)> = sqlx::query_as(
         "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
     )
-    .bind(order_id).bind(branch_id)
-    .fetch_optional(&state.pool).await.map_err(internal)?;
+    .bind(order_id)
+    .bind(branch_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
 
     let worker_id = row
         .and_then(|(id,)| id)
@@ -136,19 +140,20 @@ pub async fn force_accepted(
 }
 
 /// POST /branches/:branch_id/orders/:order_id/force-unavailable
-/// Owner marks Worker as unavailable for this order.
 pub async fn force_unavailable(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
     Json(_req): Json<ForceStateRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // Use the currently-assigned worker_id from the projection.
     let row: Option<(Option<Uuid>,)> = sqlx::query_as(
         "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
     )
-    .bind(order_id).bind(branch_id)
-    .fetch_optional(&state.pool).await.map_err(internal)?;
+    .bind(order_id)
+    .bind(branch_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
 
     let worker_id = row
         .and_then(|(id,)| id)
@@ -162,7 +167,6 @@ pub async fn force_unavailable(
 }
 
 /// POST /branches/:branch_id/orders/:order_id/force-clarification
-/// Owner manually opens a PendingClarification state.
 pub async fn force_clarification(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
@@ -172,23 +176,24 @@ pub async fn force_clarification(
     let row: Option<(Option<Uuid>,)> = sqlx::query_as(
         "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
     )
-    .bind(order_id).bind(branch_id)
-    .fetch_optional(&state.pool).await.map_err(internal)?;
+    .bind(order_id)
+    .bind(branch_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
 
     let worker_id = row
         .and_then(|(id,)| id)
         .ok_or_else(|| bad_request("no worker assigned to this order"))?;
 
-    let event = DomainEvent::OwnerForceClarification  {
+    let event = DomainEvent::OwnerForceClarification {
         worker_id: WorkerId::new(worker_id),
         order_id: OrderId::new(order_id),
     };
-
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
 /// POST /branches/:branch_id/orders/:order_id/force-ready
-/// Owner marks the order as ready for pickup.
 pub async fn force_ready(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
@@ -198,8 +203,11 @@ pub async fn force_ready(
     let row: Option<(Option<Uuid>,)> = sqlx::query_as(
         "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
     )
-    .bind(order_id).bind(branch_id)
-    .fetch_optional(&state.pool).await.map_err(internal)?;
+    .bind(order_id)
+    .bind(branch_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
 
     let worker_id = row
         .and_then(|(id,)| id)
@@ -209,7 +217,6 @@ pub async fn force_ready(
         worker_id: WorkerId::new(worker_id),
         order_id: OrderId::new(order_id),
     };
-
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
@@ -221,7 +228,6 @@ pub struct ReassignWorkerRequest {
 }
 
 /// POST /branches/:branch_id/orders/:order_id/reassign-worker
-/// Swap the assigned Worker without cancel+reset.
 pub async fn reassign_worker(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
@@ -258,8 +264,6 @@ pub struct EditDescriptionRequest {
 }
 
 /// PATCH /branches/:branch_id/orders/:order_id/description
-/// Edit order description — logged to order_description_edits; not an event.
-/// Worker is notified with both the old and new description text.
 pub async fn edit_description(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
@@ -273,8 +277,7 @@ pub async fn edit_description(
     if new_desc.len() > 1000 {
         return Err(bad_request("description max 1000 characters"));
     }
- 
-    // Verify order belongs to this branch and fetch current description.
+
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT COALESCE( \
             (SELECT new_description FROM order_description_edits \
@@ -289,13 +292,12 @@ pub async fn edit_description(
     .fetch_optional(&state.pool)
     .await
     .map_err(internal)?;
- 
+
     let old_desc = match row {
         Some((d,)) => d,
         None => return Err((StatusCode::NOT_FOUND, "order not found".to_string())),
     };
- 
-    // Log the edit.
+
     sqlx::query(
         "INSERT INTO order_description_edits (order_id, new_description) VALUES ($1, $2)",
     )
@@ -304,8 +306,7 @@ pub async fn edit_description(
     .execute(&state.pool)
     .await
     .map_err(internal)?;
- 
-    // Update projection immediately.
+
     sqlx::query(
         "UPDATE order_current_state SET description = $1, updated_at = NOW() WHERE order_id = $2",
     )
@@ -314,8 +315,7 @@ pub async fn edit_description(
     .execute(&state.pool)
     .await
     .map_err(internal)?;
- 
-    // Notify assigned worker with before → after context.
+
     let worker_row: Option<(Option<Uuid>,)> = sqlx::query_as(
         "SELECT worker_id FROM order_current_state WHERE order_id = $1",
     )
@@ -323,7 +323,7 @@ pub async fn edit_description(
     .fetch_optional(&state.pool)
     .await
     .map_err(internal)?;
- 
+
     if let Some((Some(worker_id),)) = worker_row {
         let msg = format!(
             "ℹ️ Order description updated by Owner.\n\
@@ -332,15 +332,14 @@ pub async fn edit_description(
         );
         let _ = send_message_to_worker(&state, worker_id, &msg).await;
     }
- 
-    // Publish SSE so the dashboard refreshes.
+
     let meta: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
             .bind(order_id)
             .fetch_optional(&state.pool)
             .await
             .map_err(internal)?;
- 
+
     if let Some((bid,)) = meta {
         state
             .publish_sse(domain::SseSignal::OrderChanged {
@@ -349,24 +348,26 @@ pub async fn edit_description(
             })
             .await;
     }
- 
+
     Ok(StatusCode::NO_CONTENT)
 }
+
 // ── P16: Delete order (soft) ──────────────────────────────────────────────── //
 
 /// DELETE /branches/:branch_id/orders/:order_id
-/// Soft-deletes an order. Blocked if the order has in-flight worker activity.
 pub async fn delete_order(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // Block deletion if order is actively assigned or accepted.
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT state FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
     )
-    .bind(order_id).bind(branch_id)
-    .fetch_optional(&state.pool).await.map_err(internal)?;
+    .bind(order_id)
+    .bind(branch_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
 
     if let Some((state_str,)) = row {
         let blocked = matches!(
@@ -374,33 +375,44 @@ pub async fn delete_order(
             "ASSIGNED" | "ACCEPTED" | "PENDING_CLARIFICATION" | "READY_FOR_PICKUP"
         );
         if blocked {
-            return Err((StatusCode::CONFLICT,
-                format!("Cannot delete an order in state '{state_str}'. Cancel or close it first.")));
+            return Err((
+                StatusCode::CONFLICT,
+                format!("Cannot delete an order in state '{state_str}'. Cancel or close it first."),
+            ));
         }
     }
 
     let result = sqlx::query(
         "UPDATE orders SET deleted_at = NOW() WHERE id = $1 AND branch_id = $2 AND deleted_at IS NULL",
     )
-    .bind(order_id).bind(branch_id)
-    .execute(&state.pool).await.map_err(internal)?;
+    .bind(order_id)
+    .bind(branch_id)
+    .execute(&state.pool)
+    .await
+    .map_err(internal)?;
 
     if result.rows_affected() == 0 {
         return Err((StatusCode::NOT_FOUND, "order not found".to_string()));
     }
 
-    // Remove from projection so it disappears from the dashboard.
     sqlx::query("DELETE FROM order_current_state WHERE order_id = $1")
-        .bind(order_id).execute(&state.pool).await.map_err(internal)?;
+        .bind(order_id)
+        .execute(&state.pool)
+        .await
+        .map_err(internal)?;
 
-    // Publish SSE so the list refreshes.
     let meta: Option<(uuid::Uuid,)> = sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
-        .bind(order_id).fetch_optional(&state.pool).await.map_err(internal)?;
+        .bind(order_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(internal)?;
     if let Some((bid,)) = meta {
-        state.publish_sse(domain::SseSignal::OrderChanged {
-            order_id: domain::OrderId::new(order_id),
-            branch_id: domain::BranchId::new(bid),
-        }).await;
+        state
+            .publish_sse(domain::SseSignal::OrderChanged {
+                order_id: domain::OrderId::new(order_id),
+                branch_id: domain::BranchId::new(bid),
+            })
+            .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -440,7 +452,12 @@ pub async fn resolve_clarification(
         worker_id: WorkerId::new(worker_id),
         order_id: OrderId::new(order_id),
     };
-    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
+    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await?;
+
+    // F04: Owner resolved clarification — reset unread count.
+    let _ = state.projections.clear_unread(OrderId::new(order_id)).await;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── Approve Invoice ───────────────────────────────────────────────────────── //
@@ -524,6 +541,9 @@ pub async fn message_worker(
         .await
         .map_err(internal)?;
 
+    // F04: Owner sent a direct message — reset unread count and low-confidence flag.
+    let _ = state.projections.clear_unread(OrderId::new(order_id)).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -549,9 +569,9 @@ async fn send_message_to_worker(
     let identity = ChannelIdentity { channel, external_id };
 
     match identity.channel {
-        Channel::Line      => state.line.send_push(&identity, text).await?,
-        Channel::WhatsApp  => state.whatsapp.send_push(&identity, text).await?,
-        Channel::Telegram  => state.telegram.send_push(&identity, text).await?,
+        Channel::Line => state.line.send_push(&identity, text).await?,
+        Channel::WhatsApp => state.whatsapp.send_push(&identity, text).await?,
+        Channel::Telegram => state.telegram.send_push(&identity, text).await?,
     }
     Ok(())
 }
@@ -588,9 +608,9 @@ async fn append_and_project_order(
 
 fn parse_channel(s: &str) -> Result<Channel, Box<dyn std::error::Error>> {
     match s {
-        "line"      => Ok(Channel::Line),
+        "line" => Ok(Channel::Line),
         "whats_app" => Ok(Channel::WhatsApp),
-        "telegram"  => Ok(Channel::Telegram),
-        other       => Err(format!("unknown channel: {other}").into()),
+        "telegram" => Ok(Channel::Telegram),
+        other => Err(format!("unknown channel: {other}").into()),
     }
 }

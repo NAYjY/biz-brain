@@ -1,4 +1,5 @@
 //! D03/D07: shared HTML shell fragments used by all SSR page handlers.
+//! F04: adds f04_thread.css to shell_open.
 
 use axum::response::{Html, IntoResponse, Response};
 use uuid::Uuid;
@@ -12,6 +13,7 @@ pub fn shell_open(title: &str) -> String {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{title}</title>
   <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/f04_thread.css">
 </head>
 <body>
 <div class="app-layout">"#,

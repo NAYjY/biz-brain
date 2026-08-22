@@ -1,5 +1,8 @@
 //! T02: materialized current-state projections. Dashboard (api crate) reads
 //! these directly; never the raw event stream.
+//!
+//! F04: unread_message_count, ai_routed_low_confidence, last_event_at added.
+//! orders_by_branch now sorts by last_event_at DESC (most recent activity first).
 
 use domain::{OrderId, OrderState, SupplyRequestId, SupplyRequestState};
 use sqlx::{FromRow, PgPool};
@@ -16,6 +19,12 @@ pub struct OrderCurrentState {
     pub worker_name: Option<String>,
     pub last_worker_message: Option<String>,
     pub last_worker_message_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// F04: unread worker message count. Reset when Owner opens thread / replies.
+    pub unread_message_count: i32,
+    /// F04: true when the AI classifier was below confidence threshold (F02 hook).
+    pub ai_routed_low_confidence: bool,
+    /// F04: timestamp of most-recent event — used for row sort order.
+    pub last_event_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, FromRow)]
@@ -47,13 +56,14 @@ impl ProjectionTables {
         sqlx::query(
             r#"
             INSERT INTO order_current_state
-                (order_id, branch_id, customer_id, description, state, worker_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (order_id, branch_id, customer_id, description, state, worker_id, last_event_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
             ON CONFLICT (order_id) DO UPDATE
-                SET state      = EXCLUDED.state,
-                    description = EXCLUDED.description,
-                    worker_id  = COALESCE(EXCLUDED.worker_id, order_current_state.worker_id),
-                    updated_at = NOW()
+                SET state        = EXCLUDED.state,
+                    description  = EXCLUDED.description,
+                    worker_id    = COALESCE(EXCLUDED.worker_id, order_current_state.worker_id),
+                    last_event_at = NOW(),
+                    updated_at   = NOW()
             "#,
         )
         .bind(id.into_inner())
@@ -86,6 +96,50 @@ impl ProjectionTables {
         Ok(())
     }
 
+    /// F04: increment unread count and bump last_event_at.
+    /// Called by inbox_worker after each inbound worker message is persisted.
+    pub async fn increment_unread(&self, order_id: OrderId) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE order_current_state \
+             SET unread_message_count = unread_message_count + 1, \
+                 last_event_at = NOW() \
+             WHERE order_id = $1",
+        )
+        .bind(order_id.into_inner())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// F04: reset unread count and low-confidence flag.
+    /// Called when Owner opens the thread modal or sends a reply.
+    pub async fn clear_unread(&self, order_id: OrderId) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE order_current_state \
+             SET unread_message_count = 0, \
+                 ai_routed_low_confidence = FALSE \
+             WHERE order_id = $1",
+        )
+        .bind(order_id.into_inner())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// F04 / F02 hook: mark this order row as AI-routed with low confidence.
+    /// Cleared by clear_unread().
+    pub async fn flag_low_confidence(&self, order_id: OrderId) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE order_current_state \
+             SET ai_routed_low_confidence = TRUE \
+             WHERE order_id = $1",
+        )
+        .bind(order_id.into_inner())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn upsert_supply_request_state(
         &self,
         id: SupplyRequestId,
@@ -112,13 +166,13 @@ impl ProjectionTables {
     }
 
     pub async fn orders_by_branch(&self, branch_id: Uuid) -> Result<Vec<OrderCurrentState>, sqlx::Error> {
+        // F04: sorted by last_event_at DESC (most recent activity first).
         // Pulls latest edited description, joins worker name, excludes soft-deleted.
         sqlx::query_as(
             "SELECT
                 ocs.order_id        AS id,
                 ocs.branch_id,
                 ocs.customer_id,
-                -- latest description edit wins, falls back to original
                 COALESCE(
                     (SELECT new_description FROM order_description_edits
                      WHERE order_id = ocs.order_id ORDER BY id DESC LIMIT 1),
@@ -128,13 +182,16 @@ impl ProjectionTables {
                 ocs.worker_id,
                 w.name              AS worker_name,
                 ocs.last_worker_message,
-                ocs.last_worker_message_at
+                ocs.last_worker_message_at,
+                ocs.unread_message_count,
+                ocs.ai_routed_low_confidence,
+                ocs.last_event_at
              FROM order_current_state ocs
              JOIN orders o ON o.id = ocs.order_id
              LEFT JOIN workers w ON w.id = ocs.worker_id
              WHERE ocs.branch_id = $1
                AND o.deleted_at IS NULL
-             ORDER BY ocs.updated_at DESC",
+             ORDER BY ocs.last_event_at DESC NULLS LAST, ocs.updated_at DESC",
         )
         .bind(branch_id)
         .fetch_all(&self.pool)

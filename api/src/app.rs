@@ -1,5 +1,6 @@
 //! T05 / P04 / P16: REST endpoints, webhooks, SSE.
 //! P16: force-state, reassign, edit-description, delete-order endpoints added.
+//! F04: thread endpoint added.
 
 use axum::{
     routing::{delete, get, patch, post},
@@ -13,18 +14,27 @@ pub fn build_router() -> Router<AppState> {
     let branch_routes = Router::new()
         // Orders
         .route("/orders", get(routes::orders::list_orders).post(routes::orders::create_order))
+        // F04: thread modal endpoint
+        .route("/orders/:order_id/thread", get(routes::orders::get_order_thread))
         // Customers
         .route("/customers", get(routes::customers::list_customers).post(routes::customers::create_customer))
         // Workers
         .route("/workers", get(routes::workers::list_workers).post(routes::workers::create_worker))
         .route("/workers/:worker_id", delete(routes::workers::delete_worker))
         // Supply requests
-        .route("/supply-requests",
+        .route(
+            "/supply-requests",
             get(routes::supply_requests::list_supply_requests)
                 .post(routes::supply_requests::create_supply_request),
         )
-        .route("/supply-requests/:supply_request_id/send", post(routes::supply_requests::send_supply_request))
-        .route("/supply-requests/:supply_request_id/approve-invoice", post(routes::commands::approve_invoice))
+        .route(
+            "/supply-requests/:supply_request_id/send",
+            post(routes::supply_requests::send_supply_request),
+        )
+        .route(
+            "/supply-requests/:supply_request_id/approve-invoice",
+            post(routes::commands::approve_invoice),
+        )
         // Invoices
         .route("/invoices", get(routes::invoices::list_invoices))
         .route("/invoices/:invoice_id/media", get(routes::invoices::get_invoice_media))
@@ -52,11 +62,15 @@ pub fn build_router() -> Router<AppState> {
 
     let api_v1 = Router::new()
         .nest("/branches/:branch_id", branch_routes)
-        .route("/branches", get(routes::branches::list_branches).post(routes::branches::create_branch));
+        .route(
+            "/branches",
+            get(routes::branches::list_branches).post(routes::branches::create_branch),
+        );
 
     let webhooks = Router::new()
         .route("/webhooks/line", post(routes::webhooks::line_webhook))
-        .route("/webhooks/whatsapp",
+        .route(
+            "/webhooks/whatsapp",
             get(routes::webhooks::whatsapp_verify).post(routes::webhooks::whatsapp_webhook),
         )
         .route("/webhooks/telegram", post(routes::webhooks::telegram_webhook));
