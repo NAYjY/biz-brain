@@ -566,13 +566,25 @@ async fn send_message_to_worker(
         row.ok_or("worker has no confirmed channel binding")?;
 
     let channel = parse_channel(&channel_str)?;
-    let identity = ChannelIdentity { channel, external_id };
+    let identity = ChannelIdentity { channel, external_id: external_id.clone() };
 
     match identity.channel {
         Channel::Line => state.line.send_push(&identity, text).await?,
         Channel::WhatsApp => state.whatsapp.send_push(&identity, text).await?,
         Channel::Telegram => state.telegram.send_push(&identity, text).await?,
     }
+
+    // F04: persist Owner reply in conversation_history so it appears in the
+    // thread modal alongside the worker's messages. Role = "assistant" matches
+    // the convention used by inbox_worker for bot replies.
+    let sender_key = store::conversation_history::ConversationHistoryRepository::sender_key(
+        &channel_str,
+        &external_id,
+    );
+    let history_repo =
+        store::conversation_history::ConversationHistoryRepository::new(state.pool.clone());
+    let _ = history_repo.append(&sender_key, "assistant", text).await;
+
     Ok(())
 }
 
