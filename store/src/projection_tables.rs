@@ -216,7 +216,10 @@ impl ProjectionTables {
              LEFT JOIN workers w ON w.id = ocs.worker_id
              WHERE ocs.branch_id = $1
                AND o.deleted_at IS NULL
-             ORDER BY ocs.last_event_at DESC NULLS LAST, ocs.updated_at DESC",
+             ORDER BY
+                CASE WHEN ocs.state IN ('DONE','CANCELLED') THEN 1 ELSE 0 END ASC,
+                ocs.last_event_at DESC NULLS LAST,
+                ocs.updated_at DESC",
         )
         .bind(branch_id)
         .fetch_all(&self.pool)
