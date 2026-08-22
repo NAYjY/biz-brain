@@ -10,6 +10,7 @@
 //! type, but we must not use `Path<HashMap>` twice.
 //!
 //! F04: message_worker and resolve_clarification clear unread count on reply.
+//! F01: set_short_name endpoint added.
 
 use axum::{
     extract::{Path, State},
@@ -23,6 +24,7 @@ use domain::{BranchId, Channel, ChannelIdentity, DomainEvent, InvoiceId, OrderId
 use messaging::ChannelAdapter;
 
 use crate::{event_handler, extractors::AuthorizedBranch, state::AppState};
+use crate::routes::orders::{is_unique_violation, validate_short_name};
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
@@ -333,6 +335,82 @@ pub async fn edit_description(
         let _ = send_message_to_worker(&state, worker_id, &msg).await;
     }
 
+    let meta: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(internal)?;
+
+    if let Some((bid,)) = meta {
+        state
+            .publish_sse(domain::SseSignal::OrderChanged {
+                order_id: domain::OrderId::new(order_id),
+                branch_id: domain::BranchId::new(bid),
+            })
+            .await;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── F01: Set / update short name ──────────────────────────────────────────── //
+
+#[derive(Debug, Deserialize)]
+pub struct SetShortNameRequest {
+    /// Pass null or empty string to clear the short name.
+    pub short_name: Option<String>,
+}
+
+/// PATCH /branches/:branch_id/orders/:order_id/short-name
+pub async fn set_short_name(
+    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+    Json(req): Json<SetShortNameRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // Validate length, strip whitespace, treat blank as clear.
+    let short_name = validate_short_name(req.short_name.as_deref())?;
+
+    // Verify the order belongs to this branch and is not deleted.
+    let exists: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM orders WHERE id = $1 AND branch_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(order_id)
+    .bind(branch_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, "order not found".to_string()));
+    }
+
+    // Write to source table — unique constraint enforced here.
+    sqlx::query(
+        "UPDATE orders SET short_name = $1 WHERE id = $2 AND branch_id = $3",
+    )
+    .bind(short_name.as_deref())
+    .bind(order_id)
+    .bind(branch_id)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            (StatusCode::CONFLICT, "A job with that short name already exists in this branch.".to_string())
+        } else {
+            internal(e)
+        }
+    })?;
+
+    // Mirror to projection table.
+    state
+        .projections
+        .set_short_name(OrderId::new(order_id), short_name.as_deref())
+        .await
+        .map_err(internal)?;
+
+    // Notify dashboard clients.
     let meta: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
             .bind(order_id)

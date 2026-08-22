@@ -2,6 +2,7 @@
 //! POST creates the Order directly.
 //! P16: list_orders filters soft-deleted orders via JOIN.
 //! F04: unread_message_count, ai_routed_low_confidence exposed; thread endpoint added.
+//! F01: short_name in CreateOrderRequest, OrderView, create_order, list_orders.
 
 use axum::{
     extract::{Path, State},
@@ -23,6 +24,8 @@ pub struct OrderView {
     pub state: String,
     pub worker_id: Option<Uuid>,
     pub worker_name: Option<String>,
+    /// F01: optional short human-readable job name.
+    pub short_name: Option<String>,
     /// F04: replaced inline bubble; used for thread button badge.
     pub unread_message_count: i32,
     /// F04: true when AI routed with low confidence (F02 hook).
@@ -47,6 +50,7 @@ pub async fn list_orders(
                 state: r.state,
                 worker_id: r.worker_id,
                 worker_name: r.worker_name,
+                short_name: r.short_name,
                 unread_message_count: r.unread_message_count,
                 ai_routed_low_confidence: r.ai_routed_low_confidence,
                 last_worker_message: r.last_worker_message,
@@ -60,6 +64,8 @@ pub async fn list_orders(
 pub struct CreateOrderRequest {
     pub customer_id: Uuid,
     pub description: String,
+    /// F01: optional ≤20-char job name set at create time.
+    pub short_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,17 +78,28 @@ pub async fn create_order(
     State(state): State<AppState>,
     Json(req): Json<CreateOrderRequest>,
 ) -> Result<(StatusCode, Json<CreateOrderResponse>), (StatusCode, String)> {
+    // F01: validate and normalise short_name.
+    let short_name = validate_short_name(req.short_name.as_deref())?;
+
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO orders (id, branch_id, customer_id, description) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO orders (id, branch_id, customer_id, description, short_name) \
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(id)
     .bind(branch_id)
     .bind(req.customer_id)
     .bind(&req.description)
+    .bind(short_name.as_deref())
     .execute(&state.pool)
     .await
-    .map_err(internal)?;
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            (StatusCode::CONFLICT, "A job with that short name already exists in this branch.".to_string())
+        } else {
+            internal(e)
+        }
+    })?;
 
     state
         .projections
@@ -96,6 +113,15 @@ pub async fn create_order(
         )
         .await
         .map_err(internal)?;
+
+    // F01: write short_name into projection immediately.
+    if short_name.is_some() {
+        state
+            .projections
+            .set_short_name(domain::OrderId::new(id), short_name.as_deref())
+            .await
+            .map_err(internal)?;
+    }
 
     Ok((StatusCode::CREATED, Json(CreateOrderResponse { id })))
 }
@@ -183,6 +209,26 @@ pub async fn get_order_thread(
             .map(|(role, content, created_at)| ThreadMessage { role, content, created_at })
             .collect(),
     ))
+}
+
+// ── F01: shared validation ───────────────────────────────────────────────── //
+
+/// Normalise and validate a short_name value.
+/// Returns `Ok(None)` when the input is None or blank.
+/// Returns `Err` when length > 20.
+pub fn validate_short_name(raw: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) if s.len() > 20 => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "short_name must be 20 characters or fewer".to_string(),
+        )),
+        Some(s) => Ok(Some(s.to_string())),
+    }
+}
+
+pub fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {

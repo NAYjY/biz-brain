@@ -16,6 +16,7 @@
 //! P07: terminal events remove the order from ThreadContextStore.
 //! F04: increment_unread on every inbound worker message; flag_low_confidence
 //!      when prefilter misses and Claude routes with low certainty.
+//! F01: display_name() used everywhere the bot refers to an order.
 
 use std::time::Duration;
 
@@ -34,6 +35,24 @@ use crate::{event_handler, state::AppState};
 
 fn to_history_msg(row: store::HistoryRow) -> agent::classify::HistoryMessage {
     agent::classify::HistoryMessage { role: row.role, content: row.content }
+}
+
+// ── F01: display name helper ─────────────────────────────────────────────── //
+
+/// Returns `short_name` when set, otherwise the first 30 chars of `description`
+/// with an ellipsis appended. Used in every bot outbound message that names an order.
+pub fn display_name(short_name: Option<&str>, description: &str) -> String {
+    match short_name.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(n) => n.to_string(),
+        None => {
+            let truncated: String = description.chars().take(30).collect();
+            if description.chars().count() > 30 {
+                format!("{truncated}…")
+            } else {
+                truncated
+            }
+        }
+    }
 }
 
 pub async fn run(state: AppState) {
@@ -219,8 +238,10 @@ async fn handle_worker_disambiguation_reply(
         disambig_store.advance(sender_key).await?;
         if let Some(row) = disambig_store.find(sender_key).await? {
             if let Some(next_id) = row.current_candidate() {
-                let desc = order_description(state, next_id).await?;
-                let q = format!("Is this about **{desc}**? (Yes / No)");
+                // F01: use display_name in disambiguation question.
+                let (short_name, desc) = order_display_fields(state, next_id).await?;
+                let name = display_name(short_name.as_deref(), &desc);
+                let q = format!("Is this about **{name}**? (Yes / No)");
                 send_to_sender(state, sender, &q).await;
                 return Ok(());
             }
@@ -250,9 +271,10 @@ async fn handle_worker_disambiguation_reply(
     let history: Vec<agent::classify::HistoryMessage> =
         history_rows.into_iter().map(to_history_msg).collect();
 
+    let (short_name, desc) = order_display_fields(state, confirmed_id.into_inner()).await?;
     let ctx = vec![ActiveOrderContext {
         order_id: confirmed_id.into_inner(),
-        description: order_description(state, confirmed_id.into_inner()).await?,
+        description: desc.clone(),
         state: "confirmed".to_string(),
     }];
 
@@ -295,8 +317,10 @@ async fn start_worker_disambiguation(
     disambig_store.create(sender_key, original_text, &candidate_ids, "order").await?;
 
     let first = candidates.first().copied().unwrap();
-    let desc = order_description(state, first.into_inner()).await?;
-    let question = format!("Is this about **{desc}**? (Yes / No)");
+    // F01: use display_name in first disambiguation question.
+    let (short_name, desc) = order_display_fields(state, first.into_inner()).await?;
+    let name = display_name(short_name.as_deref(), &desc);
+    let question = format!("Is this about **{name}**? (Yes / No)");
     send_to_sender(state, sender, &question).await;
     history_repo.append(sender_key, "assistant", &question).await?;
     Ok(())
@@ -603,6 +627,26 @@ async fn fetch_reply_template(state: &AppState, order_id: OrderId, event: &Domai
 
 // ── DB helpers ───────────────────────────────────────────────────────────── //
 
+/// F01: fetch both short_name and description in one query.
+async fn order_display_fields(
+    state: &AppState,
+    id: uuid::Uuid,
+) -> Result<(Option<String>, String), sqlx::Error> {
+    let row: (Option<String>, String) = sqlx::query_as(
+        "SELECT o.short_name, \
+                COALESCE( \
+                    (SELECT new_description FROM order_description_edits \
+                     WHERE order_id = $1 ORDER BY id DESC LIMIT 1), \
+                    o.description \
+                ) \
+         FROM orders o WHERE o.id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(row)
+}
+
 async fn build_order_contexts(
     state: &AppState,
     order_ids: &[OrderId],
@@ -617,7 +661,7 @@ async fn build_order_contexts(
         .await?;
 
         if let Some((st,)) = row {
-            let desc = order_description(state, oid.into_inner()).await?;
+            let (_, desc) = order_display_fields(state, oid.into_inner()).await?;
             out.push(ActiveOrderContext { order_id: oid.into_inner(), description: desc, state: st });
         }
     }
@@ -646,21 +690,6 @@ async fn active_supply_request_contexts(
     Ok(rows.into_iter().map(|(id, st, desc)| {
         ActiveOrderContext { order_id: id, description: desc, state: st }
     }).collect())
-}
-
-async fn order_description(state: &AppState, id: uuid::Uuid) -> Result<String, sqlx::Error> {
-    let (desc,): (String,) = sqlx::query_as(
-        "SELECT COALESCE(
-             (SELECT new_description FROM order_description_edits
-              WHERE order_id = $1 ORDER BY id DESC LIMIT 1),
-             description
-         )
-         FROM orders WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.pool)
-    .await?;
-    Ok(desc)
 }
 
 async fn supply_request_description(state: &AppState, id: uuid::Uuid) -> Result<String, sqlx::Error> {

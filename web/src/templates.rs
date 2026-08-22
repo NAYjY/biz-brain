@@ -1,5 +1,6 @@
 //! D03/D07: shared HTML shell fragments used by all SSR page handlers.
 //! F04: adds f04_thread.css to shell_open.
+//! F01: adds f01_order_tag.css to shell_open.
 
 use axum::response::{Html, IntoResponse, Response};
 use uuid::Uuid;
@@ -14,6 +15,7 @@ pub fn shell_open(title: &str) -> String {
   <title>{title}</title>
   <link rel="stylesheet" href="/static/css/base.css">
   <link rel="stylesheet" href="/static/css/f04_thread.css">
+  <link rel="stylesheet" href="/static/css/f01_order_tag.css">
 </head>
 <body>
 <div class="app-layout">"#,

@@ -648,3 +648,24 @@ a:hover { text-decoration: underline; }
 .thread-bubble--owner .thread-bubble__meta {
   text-align: right;
 }
+
+/* ── F01: Order short-name tag ─────────────────────────────────────────── */
+
+.order-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  color: var(--color-accent);
+  font-family: monospace;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  vertical-align: middle;
+  /* Sit just above the baseline so it aligns with mixed-case description text */
+  position: relative;
+  top: -1px;
+}

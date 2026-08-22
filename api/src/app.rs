@@ -1,6 +1,7 @@
 //! T05 / P04 / P16: REST endpoints, webhooks, SSE.
 //! P16: force-state, reassign, edit-description, delete-order endpoints added.
 //! F04: thread endpoint added.
+//! F01: short-name endpoint added.
 
 use axum::{
     routing::{delete, get, patch, post},
@@ -53,6 +54,8 @@ pub fn build_router() -> Router<AppState> {
         .route("/orders/:order_id/reassign-worker",       post(routes::commands::reassign_worker))
         .route("/orders/:order_id/description",           patch(routes::commands::edit_description))
         .route("/orders/:order_id",                       delete(routes::commands::delete_order))
+        // F01: short name
+        .route("/orders/:order_id/short-name",            patch(routes::commands::set_short_name))
         // SSE
         .route("/events", get(routes::sse::stream_branch_events))
         // Actor bindings (S06)

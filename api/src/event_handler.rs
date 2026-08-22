@@ -3,12 +3,15 @@
 //! P04: OwnerCancelled, ClarificationResolved push to Worker.
 //! P16: OwnerForceUnavailable notifies Worker; OwnerReassignWorker notifies
 //!      both old worker (removed) and new worker (assigned).
+//! F01: display_name() used in all outbound messages so workers see the
+//!      short job name rather than a UUID or raw description.
 
 use domain::{Channel, ChannelIdentity, DomainEvent};
 use messaging::ChannelAdapter;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::inbox_worker::display_name;
 use crate::state::AppState;
 
 pub async fn fan_out(state: &AppState, event: &DomainEvent) {
@@ -23,28 +26,31 @@ async fn try_fan_out(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match event {
         DomainEvent::WorkerAssigned { worker_id, order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let (short_name, desc) = order_display_fields(&state.pool, order_id.into_inner()).await?;
+            let name = display_name(short_name.as_deref(), &desc);
             let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
             let text = format!(
-                "📋 You have a new order: {desc}\n\
+                "📋 You have a new order: {name}\n\
                  Reply 'รับงาน' (accept) or 'ไม่ว่าง' (unavailable)."
             );
             send_to_identity(state, &identity, &text).await;
         }
 
         DomainEvent::OwnerCancelled { order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let (short_name, desc) = order_display_fields(&state.pool, order_id.into_inner()).await?;
+            let name = display_name(short_name.as_deref(), &desc);
             if let Some(identity) = assigned_worker_identity(&state.pool, order_id.into_inner()).await {
-                let text = format!("❌ Order cancelled by Owner: {desc}");
+                let text = format!("❌ Order cancelled by Owner: {name}");
                 send_to_identity(state, &identity, &text).await;
             }
         }
 
         DomainEvent::ClarificationResolved { worker_id, order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let (short_name, desc) = order_display_fields(&state.pool, order_id.into_inner()).await?;
+            let name = display_name(short_name.as_deref(), &desc);
             let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
             let text = format!(
-                "✅ Owner has responded about: {desc}\n\
+                "✅ Owner has responded about: {name}\n\
                  Order is back to Assigned. Please proceed."
             );
             send_to_identity(state, &identity, &text).await;
@@ -52,17 +58,19 @@ async fn try_fan_out(
 
         // P16: notify Worker they've been marked unavailable by Owner.
         DomainEvent::OwnerForceUnavailable { worker_id, order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let (short_name, desc) = order_display_fields(&state.pool, order_id.into_inner()).await?;
+            let name = display_name(short_name.as_deref(), &desc);
             let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
-            let text = format!("ℹ️ Owner has marked you as unavailable for: {desc}");
+            let text = format!("ℹ️ Owner has marked you as unavailable for: {name}");
             send_to_identity(state, &identity, &text).await;
         }
 
         DomainEvent::OwnerReassignWorker { new_worker_id, order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let (short_name, desc) = order_display_fields(&state.pool, order_id.into_inner()).await?;
+            let name = display_name(short_name.as_deref(), &desc);
             let identity = worker_identity(&state.pool, new_worker_id.into_inner()).await?;
             let text = format!(
-                "📋 You have been reassigned to: {desc}\n\
+                "📋 You have been reassigned to: {name}\n\
                 Reply 'รับงาน' (accept) or 'ไม่ว่าง' (unavailable)."
             );
             send_to_identity(state, &identity, &text).await;
@@ -88,40 +96,29 @@ async fn try_fan_out(
         }
 
         DomainEvent::OwnerForceAccepted { worker_id, order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let (short_name, desc) = order_display_fields(&state.pool, order_id.into_inner()).await?;
+            let name = display_name(short_name.as_deref(), &desc);
             let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
-            let text = format!("✅ Owner has confirmed your order: {desc}");
+            let text = format!("✅ Owner has confirmed your order: {name}");
             send_to_identity(state, &identity, &text).await;
         }
 
         DomainEvent::OwnerForceClarification { worker_id, order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let (short_name, desc) = order_display_fields(&state.pool, order_id.into_inner()).await?;
+            let name = display_name(short_name.as_deref(), &desc);
             let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
-            let text = format!("❓ Owner has a question about your order: {desc}\nPlease wait for further instructions.");
+            let text = format!(
+                "❓ Owner has a question about your order: {name}\n\
+                 Please wait for further instructions."
+            );
             send_to_identity(state, &identity, &text).await;
         }
 
         DomainEvent::OwnerForceReady { worker_id, order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
+            let (short_name, desc) = order_display_fields(&state.pool, order_id.into_inner()).await?;
+            let name = display_name(short_name.as_deref(), &desc);
             let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
-            let text = format!("📦 Owner has marked your order as ready for pickup: {desc}");
-            send_to_identity(state, &identity, &text).await;
-        }
-
-        DomainEvent::OwnerForceUnavailable { worker_id, order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
-            let identity = worker_identity(&state.pool, worker_id.into_inner()).await?;
-            let text = format!("ℹ️ Owner has marked you as unavailable for: {desc}");
-            send_to_identity(state, &identity, &text).await;
-        }
-
-        DomainEvent::OwnerReassignWorker { new_worker_id, order_id } => {
-            let desc = order_description(&state.pool, order_id.into_inner()).await?;
-            let identity = worker_identity(&state.pool, new_worker_id.into_inner()).await?;
-            let text = format!(
-                "📋 You have been reassigned to: {desc}\n\
-                Reply 'รับงาน' (accept) or 'ไม่ว่าง' (unavailable)."
-            );
+            let text = format!("📦 Owner has marked your order as ready for pickup: {name}");
             send_to_identity(state, &identity, &text).await;
         }
 
@@ -146,19 +143,24 @@ async fn send_to_identity(state: &AppState, identity: &ChannelIdentity, text: &s
 
 // ── DB helpers ───────────────────────────────────────────────────────────── //
 
-async fn order_description(pool: &PgPool, order_id: Uuid) -> Result<String, sqlx::Error> {
-    let (desc,): (String,) = sqlx::query_as(
-        "SELECT COALESCE(
-             (SELECT new_description FROM order_description_edits
-              WHERE order_id = $1 ORDER BY id DESC LIMIT 1),
-             description
-         )
-         FROM orders WHERE id = $1",
+/// F01: fetch short_name + description together (single round-trip).
+async fn order_display_fields(
+    pool: &PgPool,
+    order_id: Uuid,
+) -> Result<(Option<String>, String), sqlx::Error> {
+    let row: (Option<String>, String) = sqlx::query_as(
+        "SELECT o.short_name, \
+                COALESCE( \
+                    (SELECT new_description FROM order_description_edits \
+                     WHERE order_id = $1 ORDER BY id DESC LIMIT 1), \
+                    o.description \
+                ) \
+         FROM orders o WHERE o.id = $1",
     )
     .bind(order_id)
     .fetch_one(pool)
     .await?;
-    Ok(desc)
+    Ok(row)
 }
 
 async fn supply_request_description(pool: &PgPool, sr_id: Uuid) -> Result<String, sqlx::Error> {

@@ -1,5 +1,6 @@
-//! D04 / P16 / F04: Orders view — SSR initial render.
+//! D04 / P16 / F04 / F01: Orders view — SSR initial render.
 //! F04: inline worker-message bubble removed; thread button with unread badge added.
+//! F01: short_name tag in row, nudge banner when workers have 3+ unnamed active orders.
 
 use axum::{
     extract::{Path, State},
@@ -38,6 +39,9 @@ pub async fn render_orders(
         orders.iter().map(order_row_html).collect::<Vec<_>>().join("\n")
     };
 
+    // F01: build nudge banner if any worker has ≥3 active orders missing short_name.
+    let nudge_html = build_nudge_banner(&orders);
+
     let html = format!(
         r#"{}
 {topbar}
@@ -52,6 +56,8 @@ pub async fn render_orders(
       <button class="btn btn--primary" onclick="BB.openModal('create-order-modal')">+ New Order</button>
     </div>
   </div>
+
+  {nudge_html}
 
   <div class="card">
     <table class="data-table" id="orders-table">
@@ -89,6 +95,15 @@ pub async fn render_orders(
       <div class="form-group" id="new-customer-row" style="display:none;">
         <label class="form-label" for="new-customer-name">New customer name</label>
         <input class="form-input" id="new-customer-name" type="text" placeholder="Customer name">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="order-short-name">
+          Job name <span class="text-muted" style="font-weight:400;">(optional, max 20 chars)</span>
+        </label>
+        <input class="form-input font-mono" id="order-short-name" type="text"
+               maxlength="20" autocomplete="off"
+               placeholder="e.g. AC-B3, ท่อชั้น2">
+        <span class="text-xs text-muted" id="short-name-counter">0/20</span>
       </div>
       <div class="form-group">
         <label class="form-label" for="order-description">Description</label>
@@ -131,6 +146,7 @@ pub async fn render_orders(
         shell_open("Orders — Biz-Brain"),
         topbar = topbar_html(branch_id, "orders"),
         orders_rows_html = orders_rows_html,
+        nudge_html = nudge_html,
         branch_id = branch_id,
         shell_close = shell_close(),
     );
@@ -146,7 +162,16 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
         None => "—".to_string(),
     };
 
-    // F04: thread button — only when a worker is assigned (has something to chat about).
+    // F01: short_name tag displayed before description when set.
+    let name_prefix = match &o.short_name {
+        Some(sn) => format!(
+            r#"<span class="order-tag" title="Job name">{}</span> "#,
+            html_escape(sn)
+        ),
+        None => String::new(),
+    };
+
+    // F04: thread button — only when a worker is assigned.
     let thread_btn = if o.worker_id.is_some() {
         let unread = o.unread_message_count;
         let badge = if unread > 0 {
@@ -175,7 +200,7 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     format!(
         r#"<tr data-order-id="{id}" data-state="{state}">
   <td><span class="state-pill state-pill--{state_lower}">{state_display}</span></td>
-  <td><span class="order-desc" id="desc-{id}">{desc}</span></td>
+  <td>{name_prefix}<span class="order-desc" id="desc-{id}">{desc}</span></td>
   <td class="text-muted text-xs">{customer}</td>
   <td class="text-muted text-sm" id="worker-{id}">{worker}</td>
   <td>
@@ -192,8 +217,55 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
         desc = html_escape(&o.description),
         customer = &o.customer_id.to_string()[..8],
         worker = worker_cell,
+        name_prefix = name_prefix,
         thread_btn = thread_btn,
         ai_badge = ai_badge,
+    )
+}
+
+// ── F01: nudge banner ──────────────────────────────────────────────────────── //
+
+fn build_nudge_banner(orders: &[store::projection_tables::OrderCurrentState]) -> String {
+    use std::collections::HashMap;
+
+    // Count active unnamed orders per worker.
+    let active_states = ["ASSIGNED", "ACCEPTED", "PENDING_CLARIFICATION", "READY_FOR_PICKUP"];
+    let mut worker_unnamed: HashMap<String, u32> = HashMap::new();
+
+    for o in orders {
+        let is_active = active_states.contains(&o.state.as_str());
+        let is_unnamed = o.short_name.is_none();
+        if is_active && is_unnamed {
+            if let Some(name) = &o.worker_name {
+                *worker_unnamed.entry(name.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let offenders: Vec<String> = worker_unnamed
+        .into_iter()
+        .filter(|(_, count)| *count >= 3)
+        .map(|(name, count)| format!("{name} has {count} active orders without job names"))
+        .collect();
+
+    if offenders.is_empty() {
+        return String::new();
+    }
+
+    let lines = offenders.join("; ");
+    format!(
+        r#"<div class="nudge-banner" style="
+            background:var(--color-state-warn-bg);
+            border:1px solid var(--color-state-warn);
+            border-radius:var(--radius-sm);
+            padding:var(--space-3) var(--space-4);
+            font-size:var(--text-sm);
+            color:var(--color-state-warn);
+            margin-bottom:var(--space-4);
+            display:flex;align-items:center;gap:.5rem;">
+          ⚠️ {lines} — workers may struggle to identify them. Set job names via ⚙️ → Set job name.
+        </div>"#,
+        lines = html_escape(&lines),
     )
 }
 

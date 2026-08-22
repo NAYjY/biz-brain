@@ -1,11 +1,11 @@
 /**
- * D04 / P04 / P16 / F04: Orders page — full Owner control.
+ * D04 / P04 / P16 / F04 / F01: Orders page — full Owner control.
  *
- * F04 changes:
- *  - Inline worker-message bubble removed
- *  - Thread button (💬 + unread badge) per row opens conversation modal
- *  - AI low-confidence badge (🤖?) on rows where routing was uncertain
- *  - Orders refresh uses last_event_at sort (server-side, no client change needed)
+ * F01 changes:
+ *  - "Job name" input in Create Order modal (optional, ≤20 chars, with counter)
+ *  - order row shows short_name tag when set
+ *  - Gear menu has "✏️ Set job name" item (set/edit/clear)
+ *  - 409 Conflict on duplicate short_name gives a readable error
  */
 
 function initOrdersPage(branchId) {
@@ -20,6 +20,15 @@ function initOrdersPage(branchId) {
   attachRowActions();
   loadCustomers();
   loadWorkers();
+
+  // F01: character counter for short-name input in create modal.
+  const shortNameInput = document.getElementById('order-short-name');
+  const shortNameCounter = document.getElementById('short-name-counter');
+  if (shortNameInput && shortNameCounter) {
+    shortNameInput.addEventListener('input', () => {
+      shortNameCounter.textContent = `${shortNameInput.value.length}/20`;
+    });
+  }
 
   document.addEventListener('click', closeAllMenus);
 
@@ -48,11 +57,16 @@ function initOrdersPage(branchId) {
   }
 
   function orderRowHtml(o) {
-    const pill    = BB.statePill(o.state);
+    const pill     = BB.statePill(o.state);
     const customer = BB.escapeHtml(customerMap[o.customer_id] || BB.shortId(o.customer_id));
-    const worker  = o.worker_name ? BB.escapeHtml(o.worker_name) : '—';
+    const worker   = o.worker_name ? BB.escapeHtml(o.worker_name) : '—';
 
-    // F04: thread button — show only when a worker is assigned.
+    // F01: short_name tag.
+    const namePrefix = o.short_name
+      ? `<span class="order-tag" title="Job name">${BB.escapeHtml(o.short_name)}</span> `
+      : '';
+
+    // F04: thread button.
     let threadBtn = '';
     if (o.worker_id) {
       const unread = o.unread_message_count || 0;
@@ -70,9 +84,9 @@ function initOrdersPage(branchId) {
       : '';
 
     return `
-      <tr data-order-id="${o.id}" data-state="${o.state}">
+      <tr data-order-id="${o.id}" data-state="${o.state}" data-short-name="${BB.escapeHtml(o.short_name || '')}">
         <td>${pill}</td>
-        <td><span class="order-desc" id="desc-${o.id}">${BB.escapeHtml(o.description)}</span></td>
+        <td>${namePrefix}<span class="order-desc" id="desc-${o.id}">${BB.escapeHtml(o.description)}</span></td>
         <td class="text-muted text-sm">${customer}</td>
         <td class="text-muted text-xs" id="worker-${o.id}">${worker}</td>
         <td>
@@ -103,22 +117,17 @@ function initOrdersPage(branchId) {
   async function openThreadModal(orderId, orderDesc) {
     let messages = [];
     try {
-      // GET /thread also resets unread count server-side.
       messages = await api(`/orders/${orderId}/thread`);
     } catch (e) {
       BB.showToast(`Could not load thread: ${e.message}`, 'error');
       return;
     }
 
-    // Clear badge on the row immediately (server already cleared the DB row).
     const threadBtn = document.querySelector(`.thread-btn[data-order-id="${orderId}"]`);
     if (threadBtn) {
       threadBtn.dataset.unread = '0';
       threadBtn.innerHTML = '💬';
-      threadBtn.style.borderColor = '';
-      threadBtn.style.color = '';
     }
-    // Also clear AI badge if present.
     const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
     row?.querySelector('.ai-badge')?.remove();
 
@@ -148,12 +157,8 @@ function initOrdersPage(branchId) {
       </div>`;
 
     document.body.appendChild(backdrop);
-
-    // Scroll thread to bottom.
     const body = backdrop.querySelector('#thread-msg-body');
     body.scrollTop = body.scrollHeight;
-
-    // Focus reply box.
     backdrop.querySelector('#thread-reply-input')?.focus();
 
     backdrop.addEventListener('click', async (e) => {
@@ -164,11 +169,9 @@ function initOrdersPage(branchId) {
         const input = backdrop.querySelector('#thread-reply-input');
         const text  = input?.value.trim();
         if (!text) return;
-
         const sendBtn = backdrop.querySelector('[data-action="send"]');
         sendBtn.disabled = true;
         sendBtn.textContent = 'Sending…';
-
         try {
           await api(`/orders/${orderId}/message-worker`, {
             method: 'POST',
@@ -184,7 +187,6 @@ function initOrdersPage(branchId) {
       }
     });
 
-    // Allow Esc to close.
     const onKeyDown = (e) => {
       if (e.key === 'Escape') { backdrop.remove(); document.removeEventListener('keydown', onKeyDown); }
     };
@@ -226,6 +228,8 @@ function initOrdersPage(branchId) {
     const row      = document.querySelector(`tr[data-order-id="${orderId}"]`);
     const stateEl  = row?.querySelector('.state-pill');
     const state    = stateEl?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
+    // F01: read current short_name from data attribute set during render.
+    const currentShortName = row?.dataset.shortName ?? '';
 
     const done       = state === 'DONE';
     const cancelled  = state === 'CANCELLED';
@@ -265,7 +269,6 @@ function initOrdersPage(branchId) {
     }
     if (clarif) {
       addItem(menu, '💬 Reply to worker…',  'normal', () => {
-        // Open thread modal as the canonical reply path (F04).
         const desc = row?.querySelector('.order-desc')?.textContent ?? orderId;
         openThreadModal(orderId, desc);
       });
@@ -275,6 +278,13 @@ function initOrdersPage(branchId) {
     if (!terminal) {
       addItem(menu, '✏️ Edit description',  'normal', () => editDescription(orderId));
     }
+
+    // F01: Set / edit / clear job name — available at any non-deleted state.
+    const shortNameLabel = currentShortName
+      ? `🏷 Edit job name (${currentShortName})`
+      : '🏷 Set job name';
+    addItem(menu, shortNameLabel, 'normal', () => editShortName(orderId, currentShortName));
+
     if (!terminal) {
       addSectionLabel(menu, 'Force state (bypass messaging)');
       addItem(menu, '→ Force Accepted',       'warn', () => forceState(orderId, 'force-accepted'));
@@ -338,9 +348,17 @@ function initOrdersPage(branchId) {
     const descEl     = document.getElementById('order-description');
     const customerEl = document.getElementById('order-customer');
     const newNameEl  = document.getElementById('new-customer-name');
+    // F01: read short_name.
+    const shortNameEl = document.getElementById('order-short-name');
 
     const description = descEl.value.trim();
     if (!description) { BB.showToast('Description required', 'error'); return; }
+
+    const shortName = shortNameEl?.value.trim() || null;
+    if (shortName && shortName.length > 20) {
+      BB.showToast('Job name must be 20 characters or fewer', 'error');
+      return;
+    }
 
     let customerId = customerEl.value;
     const newName  = newNameEl.value.trim();
@@ -358,16 +376,120 @@ function initOrdersPage(branchId) {
     if (!customerId) { BB.showToast('Select or create a customer', 'error'); return; }
 
     try {
-      await api('/orders', { method: 'POST', body: JSON.stringify({ customer_id: customerId, description }) });
+      await api('/orders', {
+        method: 'POST',
+        body: JSON.stringify({ customer_id: customerId, description, short_name: shortName }),
+      });
       BB.closeModal('create-order-modal');
       descEl.value = '';
       newNameEl.value = '';
+      if (shortNameEl) { shortNameEl.value = ''; shortNameCounter.textContent = '0/20'; }
       document.getElementById('new-customer-row').style.display = 'none';
       await refreshOrderList();
     } catch (e) {
       BB.showToast(`Create order failed: ${e.message}`, 'error');
     }
   });
+
+  // ── F01: Set / edit short name ───────────────────────────────────── //
+
+  async function editShortName(orderId, currentValue) {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal" style="width:420px;">
+        <div class="modal__header">
+          <span class="modal__title">🏷 Set job name</span>
+          <button class="btn btn--ghost btn--sm" data-action="cancel">✕</button>
+        </div>
+        <div class="modal__body">
+          <div class="form-group">
+            <label class="form-label" for="sn-input">
+              Job name <span class="text-muted" style="font-weight:400;">(max 20 chars)</span>
+            </label>
+            <input class="form-input font-mono" id="sn-input" type="text"
+                   maxlength="20" value="${BB.escapeHtml(currentValue)}"
+                   placeholder="e.g. AC-B3, ท่อชั้น2" autocomplete="off">
+            <span class="text-xs text-muted" id="sn-counter">${currentValue.length}/20</span>
+          </div>
+          <p class="text-xs text-muted">
+            Leave blank to clear the job name.
+            Names must be unique within this branch.
+          </p>
+        </div>
+        <div class="modal__footer">
+          <button class="btn btn--ghost" data-action="cancel">Cancel</button>
+          <button class="btn btn--primary" data-action="save">Save</button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(backdrop);
+
+    const input   = backdrop.querySelector('#sn-input');
+    const counter = backdrop.querySelector('#sn-counter');
+    input.focus();
+    input.select();
+    input.addEventListener('input', () => {
+      counter.textContent = `${input.value.length}/20`;
+    });
+
+    backdrop.addEventListener('click', async (e) => {
+      const action = e.target.closest('[data-action]')?.dataset.action;
+      if (!action) return;
+      if (action === 'cancel') { backdrop.remove(); return; }
+
+      const newValue = input.value.trim();
+
+      // Nothing changed — close silently.
+      if (newValue === currentValue) { backdrop.remove(); return; }
+
+      try {
+        await api(`/orders/${orderId}/short-name`, {
+          method: 'PATCH',
+          body: JSON.stringify({ short_name: newValue || null }),
+        });
+        backdrop.remove();
+
+        // Update the row's data attribute so the gear menu reflects the new value
+        // until the next SSE refresh rebuilds the row.
+        const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
+        if (row) {
+          row.dataset.shortName = newValue;
+          // Update or remove the tag in the description cell.
+          const descCell = row.querySelector('td:nth-child(2)');
+          if (descCell) {
+            const existingTag = descCell.querySelector('.order-tag');
+            if (newValue) {
+              if (existingTag) {
+                existingTag.textContent = newValue;
+              } else {
+                const tag = document.createElement('span');
+                tag.className = 'order-tag';
+                tag.title = 'Job name';
+                tag.textContent = newValue;
+                descCell.prepend(document.createTextNode(' '));
+                descCell.prepend(tag);
+              }
+            } else {
+              existingTag?.remove();
+              // Remove any leading text node that was the space after the tag.
+              if (descCell.firstChild?.nodeType === Node.TEXT_NODE) {
+                descCell.firstChild.remove();
+              }
+            }
+          }
+        }
+
+        const msg = newValue ? `Job name set to "${newValue}" ✓` : 'Job name cleared';
+        BB.showToast(msg, 'success');
+      } catch (err) {
+        const msg = err.message.includes('409') || err.message.toLowerCase().includes('already exists')
+          ? 'That job name is already used by another order in this branch.'
+          : `Save failed: ${err.message}`;
+        BB.showToast(msg, 'error');
+      }
+    });
+  }
 
   // ── Assign / Reassign ────────────────────────────────────────────── //
 

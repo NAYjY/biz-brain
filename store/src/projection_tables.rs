@@ -3,6 +3,7 @@
 //!
 //! F04: unread_message_count, ai_routed_low_confidence, last_event_at added.
 //! orders_by_branch now sorts by last_event_at DESC (most recent activity first).
+//! F01: short_name added to OrderCurrentState, upsert, and query.
 
 use domain::{OrderId, OrderState, SupplyRequestId, SupplyRequestState};
 use sqlx::{FromRow, PgPool};
@@ -25,6 +26,8 @@ pub struct OrderCurrentState {
     pub ai_routed_low_confidence: bool,
     /// F04: timestamp of most-recent event — used for row sort order.
     pub last_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// F01: optional short handle (≤20 chars) the bot uses instead of description.
+    pub short_name: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -53,6 +56,8 @@ impl ProjectionTables {
         state: OrderState,
         worker_id: Option<uuid::Uuid>,
     ) -> Result<(), sqlx::Error> {
+        // short_name is not supplied here — it is written separately by
+        // set_short_name and never cleared by normal event projection.
         sqlx::query(
             r#"
             INSERT INTO order_current_state
@@ -72,6 +77,25 @@ impl ProjectionTables {
         .bind(description)
         .bind(state.to_string())
         .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// F01: write short_name to both tables in one call.
+    /// Called by the set_short_name command endpoint and create_order.
+    pub async fn set_short_name(
+        &self,
+        order_id: OrderId,
+        short_name: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE order_current_state \
+             SET short_name = $2, updated_at = NOW() \
+             WHERE order_id = $1",
+        )
+        .bind(order_id.into_inner())
+        .bind(short_name)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -167,7 +191,7 @@ impl ProjectionTables {
 
     pub async fn orders_by_branch(&self, branch_id: Uuid) -> Result<Vec<OrderCurrentState>, sqlx::Error> {
         // F04: sorted by last_event_at DESC (most recent activity first).
-        // Pulls latest edited description, joins worker name, excludes soft-deleted.
+        // F01: short_name included so API and SSR never need a separate join.
         sqlx::query_as(
             "SELECT
                 ocs.order_id        AS id,
@@ -185,7 +209,8 @@ impl ProjectionTables {
                 ocs.last_worker_message_at,
                 ocs.unread_message_count,
                 ocs.ai_routed_low_confidence,
-                ocs.last_event_at
+                ocs.last_event_at,
+                COALESCE(ocs.short_name, o.short_name) AS short_name
              FROM order_current_state ocs
              JOIN orders o ON o.id = ocs.order_id
              LEFT JOIN workers w ON w.id = ocs.worker_id
