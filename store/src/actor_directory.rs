@@ -165,13 +165,13 @@ impl ActorDirectory {
     ) -> Result<Vec<domain::OrderId>, sqlx::Error> {
         let rows: Vec<(Uuid,)> = sqlx::query_as(
             "SELECT ocs.order_id \
-             FROM order_current_state ocs \
-             WHERE ocs.worker_id = $1 \
-               AND ocs.state NOT IN ('done', 'cancelled', 'unavailable')",
+            FROM order_current_state ocs \
+            WHERE ocs.worker_id = $1 \
+            AND ocs.state NOT IN ('DONE', 'CANCELLED', 'UNAVAILABLE')",
         )
         .bind(worker_id.into_inner())
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(|(id,)| domain::OrderId::new(id)).collect())
-    }
+}
 }
