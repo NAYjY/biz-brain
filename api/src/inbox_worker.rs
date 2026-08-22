@@ -198,7 +198,6 @@ async fn process_worker_message(
 
                     let reply = fetch_reply_template(state, oid, &event).await;
                     send_to_sender(state, sender, &reply).await;
-                    history_repo.append(&sender_key, "assistant", &reply).await?;
                     append_order_event(state, event, oid).await?;
                 }
                 ResolvedOrder::NeedsDisambiguation(candidates) => {
@@ -297,7 +296,6 @@ async fn handle_worker_disambiguation_reply(
 
     let reply = fetch_reply_template(state, confirmed_id, &event).await;
     send_to_sender(state, sender, &reply).await;
-    history_repo.append(sender_key, "assistant", &reply).await?;
     append_order_event(state, event, confirmed_id).await?;
 
     Ok(())
@@ -322,7 +320,6 @@ async fn start_worker_disambiguation(
     let name = display_name(short_name.as_deref(), &desc);
     let question = format!("Is this about **{name}**? (Yes / No)");
     send_to_sender(state, sender, &question).await;
-    history_repo.append(sender_key, "assistant", &question).await?;
     Ok(())
 }
 
@@ -410,7 +407,6 @@ async fn handle_invoice_received(
             let desc = supply_request_description(state, candidates[0].into_inner()).await?;
             let q = format!("Is this invoice for **{desc}**? (Yes / No)");
             send_to_sender(state, sender, &q).await;
-            history_repo.append(sender_key, "assistant", &q).await?;
             return Ok(());
         }
         SupplyRequestResolved::None => {
@@ -428,7 +424,6 @@ async fn handle_invoice_received(
 
     let reply = "Got it ✓ Your invoice has been received.";
     send_to_sender(state, sender, reply).await;
-    history_repo.append(sender_key, "assistant", reply).await?;
     append_supply_request_event(state, event, BranchId::new(branch_id)).await?;
     Ok(())
 }
@@ -465,7 +460,6 @@ async fn handle_supplier_confirmed(
 
     let reply = "Confirmed ✓ Thank you.";
     send_to_sender(state, sender, reply).await;
-    history_repo.append(sender_key, "assistant", reply).await?;
     append_supply_request_event(state, event, BranchId::new(branch_id)).await?;
     Ok(())
 }
@@ -519,7 +513,6 @@ async fn handle_supplier_disambiguation_reply(
 
     let reply = "Got it ✓";
     send_to_sender(state, sender, reply).await;
-    history_repo.append(sender_key, "assistant", reply).await?;
     append_supply_request_event(state, event, BranchId::new(branch_id)).await?;
     Ok(())
 }
@@ -602,6 +595,14 @@ async fn send_to_sender(state: &AppState, sender: &ChannelIdentity, text: &str) 
     if let Err(e) = result {
         tracing::error!("push to {} failed: {e}", sender.external_id);
     }
+
+    let sender_key = ConversationHistoryRepository::sender_key(
+        sender.channel.as_sql(),
+        &sender.external_id,
+    );
+    let _ = ConversationHistoryRepository::new(state.pool.clone())
+        .append(&sender_key, "assistant", text)
+        .await;
 }
 
 async fn fetch_reply_template(state: &AppState, order_id: OrderId, event: &DomainEvent) -> String {
