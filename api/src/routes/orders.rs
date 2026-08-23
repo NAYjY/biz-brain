@@ -33,6 +33,9 @@ pub struct OrderView {
     // Keep for backwards compat (used by SSR worker-message row removal check).
     pub last_worker_message: Option<String>,
     pub last_worker_message_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub start_date: Option<chrono::DateTime<chrono::Utc>>,
+    pub due_date:   Option<chrono::DateTime<chrono::Utc>>,
+    pub alert_count: i64,   // active alert count for the bell badge
 }
 
 pub async fn list_orders(
@@ -55,6 +58,9 @@ pub async fn list_orders(
                 ai_routed_low_confidence: r.ai_routed_low_confidence,
                 last_worker_message: r.last_worker_message,
                 last_worker_message_at: r.last_worker_message_at,
+                start_date: r.start_date,
+                due_date: r.due_date,
+                alert_count: r.alert_count,
             })
             .collect(),
     ))
@@ -90,7 +96,7 @@ pub async fn create_order(
     .bind(branch_id)
     .bind(req.customer_id)
     .bind(&req.description)
-    .bind(short_name.as_deref())
+    .bind(short_name.as_ref().map(|s| s.as_str()))
     .execute(&state.pool)
     .await
     .map_err(|e| {

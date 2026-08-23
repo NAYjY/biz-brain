@@ -1,8 +1,9 @@
 //! API crate (T05): Axum HTTP surface for the Owner dashboard, webhooks, SSE.
-//! P01/P04/P13/P14: classify prompt harness, new command endpoints, unified routing.
+//! F05: alert_worker module added.
 
 #![warn(clippy::all)]
 
+pub mod alert_worker;  // F05
 pub mod app;
 pub mod event_handler;
 pub mod extractors;

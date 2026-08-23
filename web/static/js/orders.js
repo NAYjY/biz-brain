@@ -18,6 +18,9 @@ function initOrdersPage(branchId) {
   // ── On load ──────────────────────────────────────────────────────── //
 
   attachRowActions();
+  // F05: expose branchId on alert buttons so refreshAlertBtn can build the URL.
+  // (done inside attachRowActions already)
+
   loadCustomers();
   loadWorkers();
 
@@ -82,13 +85,17 @@ function initOrdersPage(branchId) {
     const aiBadge = o.ai_routed_low_confidence
       ? `<span class="ai-badge" title="AI-routed with low confidence — review recommended">🤖?</span>`
       : '';
+    const datePart = window.renderDateChips
+      ? window.renderDateChips(o.start_date, o.due_date)
+      : '';
 
     return `
-      <tr data-order-id="${o.id}" data-state="${o.state}" data-short-name="${BB.escapeHtml(o.short_name || '')}">
+      <tr data-order-id="${o.id}" data-state="${o.state}" data-short-name="${BB.escapeHtml(o.short_name || '')}" data-start-date="${o.start_date ?? ''}" data-due-date="${o.due_date ?? ''}">
         <td>${pill}</td>
         <td>${namePrefix}<span class="order-desc" id="desc-${o.id}">${BB.escapeHtml(o.description)}</span></td>
         <td class="text-muted text-sm">${customer}</td>
         <td class="text-muted text-xs" id="worker-${o.id}">${worker}</td>
+        <td ${datePart ? `<div style="display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:3px;">${datePart}</div>` : ''}</td>
         <td>
           <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
             ${threadBtn}${aiBadge}
@@ -284,7 +291,19 @@ function initOrdersPage(branchId) {
       ? `🏷 Edit job name (${currentShortName})`
       : '🏷 Set job name';
     addItem(menu, shortNameLabel, 'normal', () => editShortName(orderId, currentShortName));
+    // F05: dates
+    addItem(menu, '📅 Set dates', 'normal', () => {
+      const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
+      const startIso = row?.dataset.startDate ?? null;
+      const dueIso   = row?.dataset.dueDate   ?? null;
+      openDatesModal(orderId, startIso, dueIso, api);
+    });
 
+    // F05: alerts
+    addItem(menu, '🔔 Follow-up alerts', 'normal', () => {
+      const desc = row?.querySelector('.order-desc')?.textContent ?? orderId;
+      openAlertsModal(orderId, desc, api);
+    });
     if (!terminal) {
       addSectionLabel(menu, 'Force state (bypass messaging)');
       addItem(menu, '→ Force Accepted',       'warn', () => forceState(orderId, 'force-accepted'));

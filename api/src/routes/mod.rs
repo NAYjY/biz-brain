@@ -1,4 +1,5 @@
 pub mod actors;
+pub mod alerts;
 pub mod branches;
 pub mod commands;
 pub mod customers;

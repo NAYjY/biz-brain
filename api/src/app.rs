@@ -56,6 +56,11 @@ pub fn build_router() -> Router<AppState> {
         .route("/orders/:order_id",                       delete(routes::commands::delete_order))
         // F01: short name
         .route("/orders/:order_id/short-name",            patch(routes::commands::set_short_name))
+        // F05: dates + follow-up alerts
+        .route("/orders/:order_id/dates",               patch(routes::alerts::set_dates))
+        .route("/orders/:order_id/alerts",              get(routes::alerts::list_alerts)
+                                                            .post(routes::alerts::create_alert))
+        .route("/orders/:order_id/alerts/:alert_id",    delete(routes::alerts::delete_alert))
         // SSE
         .route("/events", get(routes::sse::stream_branch_events))
         // Actor bindings (S06)

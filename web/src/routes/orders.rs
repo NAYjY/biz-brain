@@ -140,6 +140,7 @@ pub async fn render_orders(
 <script src="/static/js/ui.js"></script>
 <script src="/static/js/live.js"></script>
 <script src="/static/js/orders.js"></script>
+<script src="/static/js/f05_alerts.js"></script>
 <script>initOrdersPage('{branch_id}');</script>
 {shell_close}
 "#,

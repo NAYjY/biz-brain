@@ -16,6 +16,7 @@ pub fn shell_open(title: &str) -> String {
   <link rel="stylesheet" href="/static/css/base.css">
   <link rel="stylesheet" href="/static/css/f04_thread.css">
   <link rel="stylesheet" href="/static/css/f01_order_tag.css">
+  <link rel="stylesheet" href="/static/css/f05_dates_alerts.css">
 </head>
 <body>
 <div class="app-layout">"#,
