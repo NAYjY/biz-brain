@@ -19,7 +19,6 @@ function fmtDate(iso) {
   const d = new Date(iso);
   return d.toLocaleString([], {
     day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
   });
 }
 
@@ -64,7 +63,7 @@ window.renderDateChips = function(startDate, dueDate) {
   }
   if (dueDate) {
     const cls = isOverdue(dueDate) ? 'date-chip--overdue' : 'date-chip--due';
-    const icon = isOverdue(dueDate) ? '⚠️' : '⏰';
+    const icon = isOverdue(dueDate) ? '⚠️' : '■';
     html += `<span class="date-chip ${cls}" title="Due date">${icon} ${fmtDate(dueDate)}</span>`;
   }
   return html;

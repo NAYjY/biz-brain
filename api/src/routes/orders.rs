@@ -96,7 +96,7 @@ pub async fn create_order(
     .bind(branch_id)
     .bind(req.customer_id)
     .bind(&req.description)
-    .bind(short_name.as_ref().map(|s| s.as_str()))
+    .bind(short_name.as_deref())
     .execute(&state.pool)
     .await
     .map_err(|e| {

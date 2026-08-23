@@ -65,7 +65,7 @@ impl ProjectionTables {
         sqlx::query(
             r#"
             INSERT INTO order_current_state
-                (order_id, branch_id, customer_id, description, state, worker_id, last_event_at, )
+                (order_id, branch_id, customer_id, description, state, worker_id, last_event_at)
             VALUES ($1, $2, $3, $4, $5, $6, NOW())
             ON CONFLICT (order_id) DO UPDATE
                 SET state        = EXCLUDED.state,
@@ -194,45 +194,48 @@ impl ProjectionTables {
     }
 
     pub async fn orders_by_branch(&self, branch_id: Uuid) -> Result<Vec<OrderCurrentState>, sqlx::Error> {
-        // F04: sorted by last_event_at DESC (most recent activity first).
-        // F01: short_name included so API and SSR never need a separate join.
         sqlx::query_as(
-            "SELECT
-                ocs.order_id        AS id,
+            r#"
+            SELECT
+                ocs.order_id                                    AS id,
                 ocs.branch_id,
                 ocs.customer_id,
-                COALESCE(
-                    (SELECT new_description FROM order_description_edits
-                    WHERE order_id = ocs.order_id ORDER BY id DESC LIMIT 1),
-                    o.description
-                )                   AS description,
+                COALESCE(ed.new_description, o.description)    AS description,
                 ocs.state,
                 ocs.worker_id,
-                w.name              AS worker_name,
+                w.name                                          AS worker_name,
                 ocs.last_worker_message,
                 ocs.last_worker_message_at,
                 ocs.unread_message_count,
                 ocs.ai_routed_low_confidence,
                 ocs.last_event_at,
-                COALESCE(ocs.short_name, o.short_name) AS short_name,
+                COALESCE(ocs.short_name, o.short_name)         AS short_name,
                 ocs.start_date,
                 ocs.due_date,
-                COALESCE(fa_counts.alert_count, 0)::bigint AS alert_count
+                COALESCE(fa.alert_count, 0)::bigint            AS alert_count
             FROM order_current_state ocs
             JOIN orders o ON o.id = ocs.order_id
             LEFT JOIN workers w ON w.id = ocs.worker_id
+            LEFT JOIN LATERAL (
+                SELECT new_description
+                FROM order_description_edits
+                WHERE order_id = ocs.order_id
+                ORDER BY id DESC
+                LIMIT 1
+            ) ed ON true
             LEFT JOIN (
                 SELECT order_id, COUNT(*)::bigint AS alert_count
                 FROM follow_up_alerts
                 WHERE deleted_at IS NULL
                 GROUP BY order_id
-            ) fa_counts ON fa_counts.order_id = ocs.order_id
+            ) fa ON fa.order_id = ocs.order_id
             WHERE ocs.branch_id = $1
             AND o.deleted_at IS NULL
             ORDER BY
-                CASE WHEN ocs.state IN ('DONE','CANCELLED') THEN 1 ELSE 0 END ASC,
+                CASE WHEN ocs.state IN ('DONE', 'CANCELLED') THEN 1 ELSE 0 END ASC,
                 ocs.last_event_at DESC NULLS LAST,
-                ocs.updated_at DESC",
+                ocs.updated_at DESC
+            "#,
         )
         .bind(branch_id)
         .fetch_all(&self.pool)
