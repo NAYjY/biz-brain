@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::new(pool, line, whatsapp, telegram, claude_api_key);
 
     // Spawn the async inbox drain worker.
+    tokio::spawn(api::inbox_worker::run(state.clone()));
     // F05: follow-up alert background worker (60-second poll).
     tokio::spawn(api::alert_worker::run(state.clone()));
 
