@@ -1,12 +1,8 @@
-//! T06 / P08: single binary, single Axum Router, single deploy artifact.
+//! T06 / P08 / T01: single binary, single Axum Router, single deploy artifact.
 //!
-//! P08 decisions:
-//!   - PORT: std::env::var("PORT").unwrap_or("8080") — Railway sets PORT.
-//!   - STATIC_DIR: std::env::var("STATIC_DIR").unwrap_or("web/static") —
-//!     set STATIC_DIR=web/static on Railway.  No compile-time concat! fallback.
-//!   - Migrations run on startup (already the pattern — unchanged).
-//!   - P11: Telegram webhook registered on startup when TELEGRAM_WEBHOOK_URL
-//!     env var is set.
+//! T01: reads GEMINI_API_KEY (optional — falls back to empty string, which
+//! causes Gemini calls to fail gracefully if a branch is misconfigured but
+//! the key isn't set).
 
 use api::AppState;
 use messaging::{LineAdapter, TelegramAdapter, WhatsAppAdapter};
@@ -36,7 +32,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("TELEGRAM_SECRET_TOKEN")?,
         std::env::var("TELEGRAM_BOT_TOKEN")?,
     );
+
     let claude_api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    // T01: Gemini key is optional — empty string causes graceful failure
+    // on Gemini-configured branches if the key isn't provided.
+    let gemini_api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
 
     // ── P11: register Telegram webhook on startup if URL provided ─── //
     if let Ok(webhook_url) = std::env::var("TELEGRAM_WEBHOOK_URL") {
@@ -46,14 +46,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let state = AppState::new(pool, line, whatsapp, telegram, claude_api_key);
+    let state = AppState::new(pool, line, whatsapp, telegram, claude_api_key, gemini_api_key);
 
-    // Spawn the async inbox drain worker.
     tokio::spawn(api::inbox_worker::run(state.clone()));
-    // F05: follow-up alert background worker (60-second poll).
     tokio::spawn(api::alert_worker::run(state.clone()));
 
-    // ── P08: runtime static path ──────────────────────────────────── //
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "web/static".to_string());
 
     let app = api::build_router()
@@ -61,7 +58,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest_service("/static", ServeDir::new(&static_dir))
         .with_state(state);
 
-    // P08: runtime port from env (Railway injects PORT).
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let bind_addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;

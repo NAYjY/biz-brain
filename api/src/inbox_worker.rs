@@ -1,27 +1,34 @@
 //! P14: unified inbox_worker routing flow.
 //!
+//! T01: `WorkerAgent` and `SupplierAgent` are constructed per-message using
+//! `state.classifier_for_branch(branch_id)`, which returns either the Claude
+//! or Gemini classifier depending on the branch's `ai_provider` column.
+//! Construction is O(1) — just an Arc clone — so there's no performance cost.
+//!
 //! Worker path (LINE / Telegram):
 //!   1. Resolve actor — fail-closed (register pending on unknown)
-//!   2. Load active orders + write conversation_history (P13)
-//!   3. Check disambiguation_pending FIRST — active yes/no flow takes priority
-//!   4. Otherwise: P13 classify (variant + order_id)
-//!   5. Clear → apply event; Ambiguous → start P02 yes/no flow
+//!   2. Fetch branch_id from workers table
+//!   3. Load active orders + write conversation_history (P13)
+//!   4. Check disambiguation_pending FIRST — active yes/no flow takes priority
+//!   5. Otherwise: classify with branch's AI provider (variant + order_id)
+//!   6. Clear → apply event; Ambiguous → start P02 yes/no flow
 //!
 //! Supplier path (WhatsApp):
 //!   1. Resolve actor
-//!   2. Check disambiguation_pending FIRST
-//!   3. Otherwise: classify → InvoiceReceived or SupplierConfirmed
-//!   4. P05: if message carries media_id, fetch + store bytes on invoice row
+//!   2. Fetch branch_id from suppliers table
+//!   3. Check disambiguation_pending FIRST
+//!   4. Otherwise: classify → InvoiceReceived or SupplierConfirmed
+//!   5. P05: if message carries media_id, fetch + store bytes on invoice row
 //!
 //! P07: terminal events remove the order from ThreadContextStore.
 //! F04: increment_unread on every inbound worker message; flag_low_confidence
-//!      when prefilter misses and Claude routes with low certainty.
+//!      when prefilter misses and Claude/Gemini routes with low certainty.
 //! F01: display_name() used everywhere the bot refers to an order.
 
 use std::time::Duration;
 
 use agent::classify::ActiveOrderContext;
-use agent::InterpretationError;
+use agent::{InterpretationError, SupplierAgent, WorkerAgent};
 use domain::{
     BranchId, Channel, ChannelIdentity, DomainEvent, InvoiceId, OrderId, SupplierId,
     SupplyRequestId, WorkerId,
@@ -33,14 +40,12 @@ use store::reply_templates::ReplyTemplateRepository;
 
 use crate::{event_handler, state::AppState};
 
-fn to_history_msg(row: store::HistoryRow) -> agent::classify::HistoryMessage {
-    agent::classify::HistoryMessage { role: row.role, content: row.content }
+fn to_history_msg(row: store::HistoryRow) -> agent::HistoryMessage {
+    agent::HistoryMessage { role: row.role, content: row.content }
 }
 
 // ── F01: display name helper ─────────────────────────────────────────────── //
 
-/// Returns `short_name` when set, otherwise the first 30 chars of `description`
-/// with an ellipsis appended. Used in every bot outbound message that names an order.
 pub fn display_name(short_name: Option<&str>, description: &str) -> String {
     match short_name.map(str::trim).filter(|s| !s.is_empty()) {
         Some(n) => n.to_string(),
@@ -54,6 +59,8 @@ pub fn display_name(short_name: Option<&str>, description: &str) -> String {
         }
     }
 }
+
+// ── Main loop ────────────────────────────────────────────────────────────── //
 
 pub async fn run(state: AppState) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -108,11 +115,24 @@ async fn process_worker_message(
     sender: &ChannelIdentity,
     text: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Resolve actor — fail-closed.
     let Some(worker_id) = state.actors.resolve_worker(sender).await? else {
         tracing::warn!(external_id = %sender.external_id, "unknown Worker — registering pending");
         state.actors.register_pending(sender, store::actor_directory::ActorType::Worker).await?;
         return Ok(());
     };
+
+    // T01: fetch branch_id so we can select the right AI classifier.
+    let branch_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT branch_id FROM workers WHERE id = $1",
+    )
+    .bind(worker_id.into_inner())
+    .fetch_one(&state.pool)
+    .await?;
+
+    // T01: build the agent for this branch's configured provider.
+    let classifier = state.classifier_for_branch(branch_id).await;
+    let worker_agent = WorkerAgent::new(classifier);
 
     let sender_key = ConversationHistoryRepository::sender_key(
         sender.channel.as_sql(),
@@ -122,8 +142,7 @@ async fn process_worker_message(
     let disambig_store = DisambiguationStore::new(state.pool.clone());
 
     let history_rows = history_repo.load(&sender_key).await?;
-    let history: Vec<agent::classify::HistoryMessage> =
-        history_rows.into_iter().map(to_history_msg).collect();
+    let history: Vec<agent::HistoryMessage> = history_rows.into_iter().map(to_history_msg).collect();
 
     let active_order_ids = state.actors.active_orders_for_worker(worker_id).await?;
 
@@ -142,17 +161,16 @@ async fn process_worker_message(
     if let Some(pending) = disambig_store.find(&sender_key).await? {
         return handle_worker_disambiguation_reply(
             state, sender, worker_id, &sender_key, text,
-            &pending, &history_repo, &disambig_store,
+            &pending, &history_repo, &disambig_store, &worker_agent,
         )
         .await;
     }
 
-    // P13/P14: classify with history + order contexts.
     let active_contexts = build_order_contexts(state, &active_order_ids).await?;
 
-    // Track whether we fell through to the Claude classifier (prefilter miss).
-    let prefilter_hit = state.worker_agent.prefilter_hit(text);
-    let classify_result = state.worker_agent.classify(text, &history, &active_contexts).await;
+    // Track whether prefilter hit (vs. AI classifier used).
+    let prefilter_hit = worker_agent.prefilter_hit(text);
+    let classify_result = worker_agent.classify(text, &history, &active_contexts).await;
 
     match classify_result {
         Err(InterpretationError::UnexpectedVariant { received, allowed }) => {
@@ -163,8 +181,19 @@ async fn process_worker_message(
         }
         Err(e) => {
             tracing::error!(owner_alert = true, "Worker classify error: {e}");
-            send_to_sender(state, sender,
-                "Something went wrong. The Owner has been alerted.").await;
+            // T01: retries exhausted — fall through to ClarificationRequested.
+            if let Some(oid) = active_order_ids.first().copied() {
+                let event = DomainEvent::ClarificationRequested {
+                    worker_id,
+                    order_id: oid,
+                };
+                send_to_sender(state, sender,
+                    "I couldn't process your message. The Owner has been alerted and will follow up.").await;
+                append_order_event(state, event, oid).await?;
+            } else {
+                send_to_sender(state, sender,
+                    "Something went wrong. The Owner has been alerted.").await;
+            }
         }
         Ok(None) => {
             send_to_sender(state, sender,
@@ -184,14 +213,10 @@ async fn process_worker_message(
                         threads.remove_active_order(sender, oid);
                     }
 
-                    // Save message against the confirmed order so Owner sees it under the right row.
                     let _ = state.projections.update_worker_message(oid, text).await;
-
-                    // F04: increment unread count so thread button badge updates.
                     let _ = state.projections.increment_unread(oid).await;
 
-                    // F04: flag low confidence if we had to use Claude (prefilter miss)
-                    // AND the order_id came from Claude rather than being unambiguous.
+                    // F04: flag low confidence when AI (not prefilter) resolved the order.
                     if !prefilter_hit && resolved_order_id.is_some() {
                         let _ = state.projections.flag_low_confidence(oid).await;
                     }
@@ -203,7 +228,7 @@ async fn process_worker_message(
                 ResolvedOrder::NeedsDisambiguation(candidates) => {
                     start_worker_disambiguation(
                         state, sender, &sender_key, text,
-                        candidates, &active_contexts, &disambig_store, &history_repo,
+                        candidates, &active_contexts, &disambig_store,
                     ).await?;
                 }
                 ResolvedOrder::NoActiveOrders => {
@@ -225,6 +250,7 @@ async fn handle_worker_disambiguation_reply(
     pending: &store::disambiguation::DisambiguationRow,
     history_repo: &ConversationHistoryRepository,
     disambig_store: &DisambiguationStore,
+    worker_agent: &WorkerAgent,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !is_affirmative(reply_text) && !is_negative(reply_text) {
         disambig_store.delete(sender_key).await?;
@@ -237,7 +263,6 @@ async fn handle_worker_disambiguation_reply(
         disambig_store.advance(sender_key).await?;
         if let Some(row) = disambig_store.find(sender_key).await? {
             if let Some(next_id) = row.current_candidate() {
-                // F01: use display_name in disambiguation question.
                 let (short_name, desc) = order_display_fields(state, next_id).await?;
                 let name = display_name(short_name.as_deref(), &desc);
                 let q = format!("Is this about **{name}**? (Yes / No)");
@@ -245,7 +270,7 @@ async fn handle_worker_disambiguation_reply(
                 return Ok(());
             }
         }
-        // All candidates exhausted → ClarificationRequested on first candidate.
+        // All candidates exhausted → ClarificationRequested on first.
         disambig_store.delete(sender_key).await?;
         if let Some(oid) = pending.candidates().first().copied() {
             let event = DomainEvent::ClarificationRequested {
@@ -259,7 +284,7 @@ async fn handle_worker_disambiguation_reply(
         return Ok(());
     }
 
-    // Affirmative — confirm and re-classify original text on the pinned order.
+    // Affirmative — re-classify original text on the pinned order.
     let confirmed_id = match pending.current_candidate() {
         Some(id) => OrderId::new(id),
         None => { disambig_store.delete(sender_key).await?; return Ok(()); }
@@ -267,17 +292,16 @@ async fn handle_worker_disambiguation_reply(
     disambig_store.delete(sender_key).await?;
 
     let history_rows = history_repo.load(sender_key).await?;
-    let history: Vec<agent::classify::HistoryMessage> =
-        history_rows.into_iter().map(to_history_msg).collect();
+    let history: Vec<agent::HistoryMessage> = history_rows.into_iter().map(to_history_msg).collect();
 
-    let (short_name, desc) = order_display_fields(state, confirmed_id.into_inner()).await?;
+    let (_, desc) = order_display_fields(state, confirmed_id.into_inner()).await?;
     let ctx = vec![ActiveOrderContext {
         order_id: confirmed_id.into_inner(),
-        description: desc.clone(),
+        description: desc,
         state: "confirmed".to_string(),
     }];
 
-    let variant = state.worker_agent
+    let variant = worker_agent
         .classify(&pending.original_text, &history, &ctx).await
         .ok().flatten()
         .map(|(v, _)| v)
@@ -291,7 +315,6 @@ async fn handle_worker_disambiguation_reply(
     }
 
     let _ = state.projections.update_worker_message(confirmed_id, &pending.original_text).await;
-    // F04: increment unread on the confirmed order (disambiguation was about this message).
     let _ = state.projections.increment_unread(confirmed_id).await;
 
     let reply = fetch_reply_template(state, confirmed_id, &event).await;
@@ -309,13 +332,11 @@ async fn start_worker_disambiguation(
     candidates: Vec<OrderId>,
     _contexts: &[ActiveOrderContext],
     disambig_store: &DisambiguationStore,
-    history_repo: &ConversationHistoryRepository,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let candidate_ids: Vec<uuid::Uuid> = candidates.iter().map(|id| id.into_inner()).collect();
     disambig_store.create(sender_key, original_text, &candidate_ids, "order").await?;
 
     let first = candidates.first().copied().unwrap();
-    // F01: use display_name in first disambiguation question.
     let (short_name, desc) = order_display_fields(state, first.into_inner()).await?;
     let name = display_name(short_name.as_deref(), &desc);
     let question = format!("Is this about **{name}**? (Yes / No)");
@@ -331,11 +352,24 @@ async fn process_supplier_message(
     text: &str,
     media_id: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Resolve actor — fail-closed.
     let Some(supplier_id) = state.actors.resolve_supplier(sender).await? else {
         tracing::warn!(external_id = %sender.external_id, "unknown Supplier — registering pending");
         state.actors.register_pending(sender, store::actor_directory::ActorType::Supplier).await?;
         return Ok(());
     };
+
+    // T01: fetch branch_id so we can select the right AI classifier.
+    let branch_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT branch_id FROM suppliers WHERE id = $1",
+    )
+    .bind(supplier_id.into_inner())
+    .fetch_one(&state.pool)
+    .await?;
+
+    // T01: build the agent for this branch's configured provider.
+    let classifier = state.classifier_for_branch(branch_id).await;
+    let supplier_agent = SupplierAgent::new(classifier);
 
     let sender_key = ConversationHistoryRepository::sender_key(
         sender.channel.as_sql(),
@@ -354,18 +388,21 @@ async fn process_supplier_message(
     }
 
     let history_rows = history_repo.load(&sender_key).await?;
-    let history: Vec<agent::classify::HistoryMessage> =
-        history_rows.into_iter().map(to_history_msg).collect();
+    let history: Vec<agent::HistoryMessage> = history_rows.into_iter().map(to_history_msg).collect();
 
     let active_srs = active_supply_request_contexts(state, supplier_id).await?;
 
-    match state.supplier_agent.classify(text, &history, &active_srs).await {
+    match supplier_agent.classify(text, &history, &active_srs).await {
         Err(InterpretationError::UnexpectedVariant { received, allowed }) => {
             tracing::error!(owner_alert = true,
                 "unexpected supplier variant '{received}' (allowed: {allowed})");
             send_to_sender(state, sender, "Sorry, I didn't understand that.").await;
         }
-        Err(e) => tracing::error!(owner_alert = true, "supplier classify error: {e}"),
+        Err(e) => {
+            tracing::error!(owner_alert = true, "supplier classify error: {e}");
+            send_to_sender(state, sender,
+                "Something went wrong processing your message. The Owner has been alerted.").await;
+        }
         Ok(None) => {
             send_to_sender(state, sender, "Sorry, I didn't understand that.").await;
         }
@@ -422,8 +459,7 @@ async fn handle_invoice_received(
     let branch_id = branch_for_supply_request(state, supply_request_id.into_inner()).await?;
     let event = DomainEvent::InvoiceReceived { supplier_id, supply_request_id, invoice_id };
 
-    let reply = "Got it ✓ Your invoice has been received.";
-    send_to_sender(state, sender, reply).await;
+    send_to_sender(state, sender, "Got it ✓ Your invoice has been received.").await;
     append_supply_request_event(state, event, BranchId::new(branch_id)).await?;
     Ok(())
 }
@@ -458,8 +494,7 @@ async fn handle_supplier_confirmed(
     let branch_id = branch_for_supply_request(state, supply_request_id.into_inner()).await?;
     let event = DomainEvent::SupplierConfirmed { supplier_id, supply_request_id, invoice_id };
 
-    let reply = "Confirmed ✓ Thank you.";
-    send_to_sender(state, sender, reply).await;
+    send_to_sender(state, sender, "Confirmed ✓ Thank you.").await;
     append_supply_request_event(state, event, BranchId::new(branch_id)).await?;
     Ok(())
 }
@@ -511,8 +546,7 @@ async fn handle_supplier_disambiguation_reply(
         DomainEvent::InvoiceReceived { supplier_id, supply_request_id: confirmed_id, invoice_id }
     };
 
-    let reply = "Got it ✓";
-    send_to_sender(state, sender, reply).await;
+    send_to_sender(state, sender, "Got it ✓").await;
     append_supply_request_event(state, event, BranchId::new(branch_id)).await?;
     Ok(())
 }
@@ -526,14 +560,14 @@ enum ResolvedOrder {
 }
 
 fn resolve_order_id(
-    from_claude: Option<uuid::Uuid>,
+    from_ai: Option<uuid::Uuid>,
     active_ids: &[OrderId],
 ) -> ResolvedOrder {
     match active_ids {
         [] => ResolvedOrder::NoActiveOrders,
         [only] => ResolvedOrder::Single(*only),
         many => {
-            if let Some(id) = from_claude {
+            if let Some(id) = from_ai {
                 let oid = OrderId::new(id);
                 if many.contains(&oid) {
                     return ResolvedOrder::Single(oid);
@@ -551,14 +585,14 @@ enum SupplyRequestResolved {
 }
 
 fn resolve_supply_request(
-    from_claude: Option<uuid::Uuid>,
+    from_ai: Option<uuid::Uuid>,
     active: &[ActiveOrderContext],
 ) -> SupplyRequestResolved {
     match active {
         [] => SupplyRequestResolved::None,
         [only] => SupplyRequestResolved::Single(SupplyRequestId::new(only.order_id)),
         many => {
-            if let Some(id) = from_claude {
+            if let Some(id) = from_ai {
                 if many.iter().any(|ctx| ctx.order_id == id) {
                     return SupplyRequestResolved::Single(SupplyRequestId::new(id));
                 }
@@ -628,7 +662,6 @@ async fn fetch_reply_template(state: &AppState, order_id: OrderId, event: &Domai
 
 // ── DB helpers ───────────────────────────────────────────────────────────── //
 
-/// F01: fetch both short_name and description in one query.
 async fn order_display_fields(
     state: &AppState,
     id: uuid::Uuid,

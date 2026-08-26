@@ -73,6 +73,11 @@ pub fn build_router() -> Router<AppState> {
         .route(
             "/branches",
             get(routes::branches::list_branches).post(routes::branches::create_branch),
+        )
+        // T01: per-branch AI provider selection
+        .route(
+            "/branches/:branch_id/ai-provider",
+            axum::routing::patch(routes::branches::set_ai_provider),
         );
 
     let webhooks = Router::new()

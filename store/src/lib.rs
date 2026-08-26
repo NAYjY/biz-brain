@@ -15,7 +15,9 @@ pub mod projection_worker;
 pub mod reply_templates;
 pub mod supply_request_events;
 pub mod webhook_inbox;
+pub mod branch_config;
 
+pub use branch_config::BranchConfigRepository;
 pub use actor_directory::{ActorDirectory, PendingBinding};
 pub use alerts::{AlertMode, AlertRepository, AlertView};  // F05
 pub use conversation_history::{ConversationHistoryRepository, HistoryRow};

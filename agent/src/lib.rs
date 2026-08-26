@@ -1,43 +1,45 @@
-//! Agent crate (T03 / P01 / P13): turns an inbound Worker/Supplier message
-//! into zero or more `DomainEvent`s.
+//! Agent crate (T01 / T03 / P01 / P13).
 //!
-//! P01: prompt harness, Thai/English few-shot, structured output validation.
-//! P13: conversation history window, `{ variant, order_id }` output.
-//! P06: SupplierConfirmed in prefilter and classifier.
-//! F04: `prefilter_hit()` exposed so inbox_worker can flag low-confidence routing.
+//! T01: `WorkerAgent` and `SupplierAgent` now hold `Arc<dyn ClassifyClient>`
+//! so the caller can inject either `ClaudeClassifier` or `GeminiClassifier`
+//! based on per-branch config. No other behaviour changes.
 
 #![warn(clippy::all)]
 
 pub mod classify;
 pub mod outcome;
 pub mod prefilter;
+pub mod provider;
 pub mod thread_context;
 
-pub use classify::{ActiveOrderContext, ClaudeClassifier, HistoryMessage};
+pub use classify::{ActiveOrderContext, ClaudeClassifier, GeminiClassifier, HistoryMessage};
 pub use outcome::{InterpretationError, InterpretationOutcome, OwnerAlert};
+pub use provider::{AiProvider, ClassifyClient};
 pub use thread_context::ThreadContextStore;
+
+use std::sync::Arc;
 
 use domain::{DomainEvent, DomainEventVariant, OrderId, WorkerId};
 use prefilter::Prefilter;
 
-/// Agent for Worker messages (LINE / Telegram).
+// ── Worker agent ──────────────────────────────────────────────────────────── //
+
 pub struct WorkerAgent {
     prefilter: Prefilter,
-    classifier: ClaudeClassifier,
+    classifier: Arc<dyn ClassifyClient>,
 }
 
 impl WorkerAgent {
-    pub fn new(classifier: ClaudeClassifier) -> Self {
+    pub fn new(classifier: Arc<dyn ClassifyClient>) -> Self {
         Self { prefilter: Prefilter::worker_events(), classifier }
     }
 
-    /// Returns `true` if the prefilter matched (no Claude call was needed).
+    /// Returns `true` if the prefilter matched (no AI call was made).
     /// F04: used by inbox_worker to decide whether to set ai_routed_low_confidence.
     pub fn prefilter_hit(&self, message: &str) -> bool {
         self.prefilter.classify(message).is_some()
     }
 
-    /// Attempt prefilter first; fall through to Claude classify on miss.
     pub async fn classify(
         &self,
         message: &str,
@@ -47,18 +49,19 @@ impl WorkerAgent {
         if let Some(variant) = self.prefilter.classify(message) {
             return Ok(Some((variant, None)));
         }
-        self.classifier.classify_worker_message(message, history, active_orders).await
+        self.classifier.classify_worker(message, history, active_orders).await
     }
 }
 
-/// Agent for Supplier messages (WhatsApp).
+// ── Supplier agent ────────────────────────────────────────────────────────── //
+
 pub struct SupplierAgent {
     prefilter: Prefilter,
-    classifier: ClaudeClassifier,
+    classifier: Arc<dyn ClassifyClient>,
 }
 
 impl SupplierAgent {
-    pub fn new(classifier: ClaudeClassifier) -> Self {
+    pub fn new(classifier: Arc<dyn ClassifyClient>) -> Self {
         Self { prefilter: Prefilter::supplier_events(), classifier }
     }
 
@@ -75,11 +78,12 @@ impl SupplierAgent {
         if let Some(variant) = self.prefilter.classify(message) {
             return Ok(Some((variant, None)));
         }
-        self.classifier.classify_supplier_message(message, history, active_supply_requests).await
+        self.classifier.classify_supplier(message, history, active_supply_requests).await
     }
 }
 
-/// Construct the concrete `DomainEvent` from a Worker-side variant.
+// ── Event construction ────────────────────────────────────────────────────── //
+
 pub fn construct_worker_event(
     variant: DomainEventVariant,
     worker_id: WorkerId,

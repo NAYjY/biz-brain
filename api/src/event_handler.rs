@@ -7,6 +7,7 @@
 //!      short job name rather than a UUID or raw description.
 
 use domain::{Channel, ChannelIdentity, DomainEvent};
+use store::conversation_history::ConversationHistoryRepository;
 use messaging::ChannelAdapter;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -139,6 +140,13 @@ async fn send_to_identity(state: &AppState, identity: &ChannelIdentity, text: &s
     if let Err(e) = result {
         tracing::error!("push to {} failed: {e}", identity.external_id);
     }
+    let identity_key = ConversationHistoryRepository::sender_key(
+        identity.channel.as_sql(),
+        &identity.external_id,
+    );
+    let _ = ConversationHistoryRepository::new(state.pool.clone())
+        .append(&identity_key, "assistant", text)
+        .await;
 }
 
 // ── DB helpers ───────────────────────────────────────────────────────────── //

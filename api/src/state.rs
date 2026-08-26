@@ -1,17 +1,24 @@
 //! Shared application state threaded through every axum handler.
 //!
-//! P01: `reply_templates` added.
+//! T01: holds both `ClaudeClassifier` and `GeminiClassifier` as
+//! `Arc<dyn ClassifyClient>`. `classifier_for_branch()` reads the branch's
+//! `ai_provider` column and returns the right one.
+//!
+//! `WorkerAgent` and `SupplierAgent` are constructed per-classify-call inside
+//! inbox_worker (cheap — they hold only an Arc) rather than stored on AppState,
+//! so provider switching takes effect immediately without a restart.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent::{ClaudeClassifier, SupplierAgent, WorkerAgent};
+use agent::{AiProvider, ClassifyClient, ClaudeClassifier, GeminiClassifier};
 use domain::SseSignal;
 use messaging::{LineAdapter, TelegramAdapter, WhatsAppAdapter};
 use sqlx::PgPool;
 use store::{
-    ActorDirectory, EventSourcing, OrderEventRepository, ProjectionTables, ProjectionWorker,
-    ReplyTemplateRepository, SupplyRequestEventRepository, WebhookInbox,
+    ActorDirectory, BranchConfigRepository, EventSourcing, OrderEventRepository,
+    ProjectionTables, ProjectionWorker, ReplyTemplateRepository,
+    SupplyRequestEventRepository, WebhookInbox,
 };
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
@@ -29,11 +36,13 @@ pub struct AppState {
     pub inbox: Arc<WebhookInbox>,
     pub actors: Arc<ActorDirectory>,
     pub reply_templates: Arc<ReplyTemplateRepository>,
+    pub branch_config: Arc<BranchConfigRepository>,
     pub line: Arc<LineAdapter>,
     pub whatsapp: Arc<WhatsAppAdapter>,
     pub telegram: Arc<TelegramAdapter>,
-    pub worker_agent: Arc<WorkerAgent>,
-    pub supplier_agent: Arc<SupplierAgent>,
+    /// Both classifiers pre-built; chosen per-branch at classify time.
+    pub claude_classifier: Arc<dyn ClassifyClient>,
+    pub gemini_classifier: Arc<dyn ClassifyClient>,
     pub threads: Arc<Mutex<agent::ThreadContextStore>>,
     /// T07: one broadcast channel per Branch, lazily created.
     pub sse_branches: Arc<Mutex<HashMap<Uuid, broadcast::Sender<SseSignal>>>>,
@@ -52,8 +61,11 @@ impl AppState {
         whatsapp: WhatsAppAdapter,
         telegram: TelegramAdapter,
         claude_api_key: impl Into<String>,
+        gemini_api_key: impl Into<String>,
     ) -> Self {
         let claude_api_key = claude_api_key.into();
+        let gemini_api_key = gemini_api_key.into();
+
         Self {
             event_sourcing: Arc::new(EventSourcing::new(pool.clone())),
             order_events: Arc::new(OrderEventRepository::new(pool.clone())),
@@ -63,14 +75,25 @@ impl AppState {
             inbox: Arc::new(WebhookInbox::new(pool.clone())),
             actors: Arc::new(ActorDirectory::new(pool.clone())),
             reply_templates: Arc::new(ReplyTemplateRepository::new(pool.clone())),
+            branch_config: Arc::new(BranchConfigRepository::new(pool.clone())),
             line: Arc::new(line),
             whatsapp: Arc::new(whatsapp),
             telegram: Arc::new(telegram),
-            worker_agent: Arc::new(WorkerAgent::new(ClaudeClassifier::new(claude_api_key.clone()))),
-            supplier_agent: Arc::new(SupplierAgent::new(ClaudeClassifier::new(claude_api_key))),
+            claude_classifier: Arc::new(ClaudeClassifier::new(claude_api_key)),
+            gemini_classifier: Arc::new(GeminiClassifier::new(gemini_api_key)),
             threads: Arc::new(Mutex::new(agent::ThreadContextStore::new())),
             sse_branches: Arc::new(Mutex::new(HashMap::new())),
             pool,
+        }
+    }
+
+    /// Returns the classifier configured for this branch.
+    /// Falls back to Claude on any DB error.
+    pub async fn classifier_for_branch(&self, branch_id: Uuid) -> Arc<dyn ClassifyClient> {
+        let provider_str: String = self.branch_config.ai_provider(branch_id).await;
+        match AiProvider::from_sql(&provider_str) {
+            AiProvider::Gemini => Arc::clone(&self.gemini_classifier),
+            AiProvider::Claude => Arc::clone(&self.claude_classifier),
         }
     }
 

@@ -1,39 +1,71 @@
-//! T03 / P01 output contract: two lanes.
-//! `DomainEvent` JSON is system truth; outbound NL text is separate.
+//! T01 / P01 output contract.
 //!
-//! P01: `InterpretationError::UnexpectedVariant` added — triggers Owner alert,
-//! never silently dropped.
+//! `InterpretationError` now carries an internal `retryable` flag used by
+//! the classify retry loop. The flag is never exposed to callers outside
+//! the agent crate — they only see the error variant.
 
 use domain::{DomainEvent, OrderId};
 
 #[derive(Debug)]
 pub enum InterpretationOutcome {
-    /// A DomainEvent was produced — hand to `store::EventSourcing::append`.
     Event(DomainEvent),
-    /// Sender has multiple active Orders and the message didn't disambiguate.
-    /// Agent sends a ranked clarifying question back to the Worker (P02).
     NeedsOrderDisambiguation { candidates: Vec<OrderId>, question: String },
-    /// Pre-filter + classify both returned nothing, or a timeout elapsed.
-    /// Not itself a DomainEvent; routes to ClarificationRequested at the caller.
     Unprocessed { reason: String },
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum InterpretationError {
-    #[error("Claude API error: {0}")]
+    #[error("AI API error: {0}")]
     ClaudeApi(String),
-    #[error("Claude response failed to parse: {0}")]
+    #[error("AI response failed to parse: {0}")]
     ParseFailed(String),
-    /// P01: Claude returned a variant not in the allowed set.
-    /// This is a signal integrity issue that must alert the Owner.
+    /// P01: returned a variant not in the allowed set.
     #[error("unexpected variant '{received}' (allowed: {allowed})")]
     UnexpectedVariant { received: String, allowed: String },
     #[error("request timed out")]
     Timeout,
 }
 
-/// T03 / P01: any Claude API error/timeout/parse-fail/unexpected-variant drops
-/// the message and raises an urgent Owner alert.
+impl InterpretationError {
+    /// Whether the classify retry loop should try again after this error.
+    /// Network timeouts and 429/5xx are transient. Parse failures and
+    /// unexpected variants are not — retrying won't help.
+    pub(crate) fn is_retryable(&self) -> bool {
+        matches!(self, Self::Timeout | Self::ClaudeApi(_) if self.retryable_flag())
+    }
+
+    // Internal: retryable flag is stored as a tag in the message string to
+    // avoid a separate enum variant. Only ClaudeApi errors carry it.
+    pub(crate) fn retryable_flag(&self) -> bool {
+        match self {
+            // Timeout is always retryable.
+            Self::Timeout => true,
+            // ClaudeApi: retryable iff message starts with the sentinel.
+            Self::ClaudeApi(msg) => msg.starts_with("[transient]"),
+            _ => false,
+        }
+    }
+
+    /// Shorthand called from classify.rs on network errors and 429/5xx.
+    pub(crate) fn mark_transient(self) -> Self {
+        self.with_retryable(true)
+    }
+
+    /// Tag this error as transient (retryable). Used in `classify.rs` when
+    /// an HTTP 429 or 5xx is returned.
+    pub(crate) fn with_retryable(self, retryable: bool) -> Self {
+        if !retryable {
+            return self;
+        }
+        match self {
+            Self::ClaudeApi(msg) if !msg.starts_with("[transient]") => {
+                Self::ClaudeApi(format!("[transient]{msg}"))
+            }
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct OwnerAlert {
     pub urgent: bool,
@@ -42,6 +74,11 @@ pub struct OwnerAlert {
 
 impl From<InterpretationError> for OwnerAlert {
     fn from(err: InterpretationError) -> Self {
-        OwnerAlert { urgent: true, message: format!("Message could not be interpreted and was dropped: {err}") }
+        // Strip the internal sentinel before surfacing to Owner.
+        let message = err.to_string().replace("[transient]", "");
+        OwnerAlert {
+            urgent: true,
+            message: format!("Message could not be interpreted and was dropped: {message}"),
+        }
     }
 }
