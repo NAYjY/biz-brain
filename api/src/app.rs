@@ -1,7 +1,5 @@
-//! T05 / P04 / P16: REST endpoints, webhooks, SSE.
-//! P16: force-state, reassign, edit-description, delete-order endpoints added.
-//! F04: thread endpoint added.
-//! F01: short-name endpoint added.
+//! T05 / P04 / P16 / T20: REST endpoints, webhooks, SSE.
+//! T20: Admin routes (/admin/owners) and Manager management endpoints added.
 
 use axum::{
     routing::{delete, get, patch, post},
@@ -66,7 +64,17 @@ pub fn build_router() -> Router<AppState> {
         // Actor bindings (S06)
         .route("/actors/pending",           get(routes::actors::list_pending_bindings))
         .route("/actors/:actor_id/confirm", post(routes::actors::confirm_binding))
-        .route("/actors/:actor_id/reject",  post(routes::actors::reject_binding));
+        .route("/actors/:actor_id/reject",  post(routes::actors::reject_binding))
+        // T20: Manager management (Owner-only)
+        .route(
+            "/managers",
+            get(routes::branches::list_branch_managers)
+                .post(routes::branches::grant_branch_access),
+        )
+        .route(
+            "/managers/:manager_id",
+            delete(routes::branches::revoke_branch_access),
+        );
 
     let api_v1 = Router::new()
         .nest("/branches/:branch_id", branch_routes)
@@ -74,11 +82,13 @@ pub fn build_router() -> Router<AppState> {
             "/branches",
             get(routes::branches::list_branches).post(routes::branches::create_branch),
         )
-        // T01: per-branch AI provider selection
+        // T01: per-branch AI provider selection (Owner-only)
         .route(
             "/branches/:branch_id/ai-provider",
-            axum::routing::patch(routes::branches::set_ai_provider),
-        );
+            patch(routes::branches::set_ai_provider),
+        )
+        // T20: Manager creation (Owner-only, not branch-scoped)
+        .route("/managers", post(routes::branches::create_manager));
 
     let webhooks = Router::new()
         .route("/webhooks/line", post(routes::webhooks::line_webhook))

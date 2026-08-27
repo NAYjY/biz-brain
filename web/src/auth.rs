@@ -1,6 +1,5 @@
-//! D03: Branch-ownership auth check shared between `api`'s route extractors
-//! and `web`'s SSR handlers. Both crates call this directly rather than
-//! duplicating the cookie-decode + token_version + branch-ownership logic.
+//! D03 / T20: Branch-ownership auth check shared between `api`'s route
+//! extractors and `web`'s SSR handlers. T20: queries `users` table.
 
 use axum::{
     http::StatusCode,
@@ -15,14 +14,12 @@ use api::extractors::Claims;
 
 pub enum BranchAuthOutcome {
     Authorized { claims: Claims, branch_id: Uuid },
-    /// Redirect to login (no cookie / invalid token).
     Unauthenticated,
-    /// Valid session but branch not owned by this Owner.
     Forbidden,
 }
 
-/// Validates cookie -> Claims -> token_version -> branch ownership.
-/// Used by SSR handlers (web crate) to guard per-branch pages.
+/// Validates cookie → Claims → token_version → branch access.
+/// Works for both Owner and Manager (branch_ids in JWT covers both).
 pub async fn authorize_branch(
     jar: &CookieJar,
     pool: &PgPool,
@@ -52,8 +49,9 @@ fn decode_claims(jar: &CookieJar) -> Option<Claims> {
 }
 
 async fn token_version_valid(pool: &PgPool, claims: &Claims) -> bool {
+    // T20: users table (was owners).
     let Ok(row) = sqlx::query_as::<_, (i32,)>(
-        "SELECT token_version FROM owners WHERE id = $1"
+        "SELECT token_version FROM users WHERE id = $1"
     )
     .bind(claims.sub)
     .fetch_optional(pool)

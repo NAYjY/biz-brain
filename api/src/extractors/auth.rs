@@ -1,6 +1,8 @@
-//! T05 / S04: JWT in an httpOnly cookie.
-//! Carries Owner identity + owned Branch ids.
-//! S04: token_version claim checked against DB on every authenticated request.
+//! T05 / S04 / T20: JWT in an httpOnly cookie.
+//! T20: Claims now carries `role` ("owner" | "manager").
+//!      Owners see all branches (branch_ids populated from DB at login).
+//!      Managers see only their granted branches (from user_branch_access).
+//!      AuthorizedBranch checks branch_ids in both cases — no DB hit per request.
 
 use async_trait::async_trait;
 use axum::{
@@ -16,9 +18,11 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: Uuid,
+    /// "owner" | "manager"
+    pub role: String,
     pub branch_ids: Vec<Uuid>,
     pub exp: usize,
-    /// S04: must match owners.token_version in DB.
+    /// S04: must match users.token_version in DB.
     pub token_version: i32,
 }
 
@@ -26,9 +30,18 @@ impl Claims {
     pub fn owns(&self, branch_id: Uuid) -> bool {
         self.branch_ids.contains(&branch_id)
     }
+
+    pub fn is_owner(&self) -> bool {
+        self.role == "owner"
+    }
+
+    pub fn is_manager(&self) -> bool {
+        self.role == "manager"
+    }
 }
 
 /// Extractor: validates JWT sig + exp + token_version.
+/// Works for both Owner and Manager — does not check branch scope.
 pub struct AuthedOwner(pub Claims);
 
 #[async_trait]
@@ -64,10 +77,10 @@ where
 
         let claims = data.claims;
 
-        // S04: token_version check.
+        // S04: token_version check against users table.
         let pool = PgPool::from_ref(state);
         let row: Option<(i32,)> =
-            sqlx::query_as("SELECT token_version FROM owners WHERE id = $1")
+            sqlx::query_as("SELECT token_version FROM users WHERE id = $1")
                 .bind(claims.sub)
                 .fetch_optional(&pool)
                 .await
@@ -75,7 +88,7 @@ where
 
         let current = row
             .map(|(v,)| v)
-            .ok_or((StatusCode::UNAUTHORIZED, "owner not found"))?;
+            .ok_or((StatusCode::UNAUTHORIZED, "account not found"))?;
 
         if claims.token_version != current {
             return Err((StatusCode::UNAUTHORIZED, "session revoked"));
@@ -85,7 +98,32 @@ where
     }
 }
 
-/// Per-request Branch-ownership check (T05: URL-scoped, not cookie-scoped).
+/// Extractor: Owner-only endpoints (e.g. create branch, manage managers).
+/// Rejects Manager tokens with 403.
+pub struct AuthedOwnerOnly(pub Claims);
+
+#[async_trait]
+impl<S> FromRequestParts<S> for AuthedOwnerOnly
+where
+    S: Send + Sync,
+    PgPool: FromRef<S>,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let AuthedOwner(claims) =
+            parts.extract_with_state::<AuthedOwner, S>(state).await?;
+
+        if !claims.is_owner() {
+            return Err((StatusCode::FORBIDDEN, "Owner role required"));
+        }
+
+        Ok(AuthedOwnerOnly(claims))
+    }
+}
+
+/// Per-request Branch-ownership check (T05 / T20: URL-scoped, works for both
+/// Owner and Manager — branch_ids in JWT covers both cases).
 pub struct AuthorizedBranch {
     pub branch_id: Uuid,
     pub claims: Claims,
@@ -115,7 +153,7 @@ where
             .map_err(|_| (StatusCode::BAD_REQUEST, "branch_id is not a valid UUID"))?;
 
         if !claims.owns(branch_id) {
-            return Err((StatusCode::FORBIDDEN, "Branch not owned by authenticated Owner"));
+            return Err((StatusCode::FORBIDDEN, "Branch not accessible"));
         }
 
         Ok(AuthorizedBranch { branch_id, claims })

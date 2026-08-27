@@ -63,6 +63,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "bcrypt",
  "chrono",
  "domain",
  "futures-core",

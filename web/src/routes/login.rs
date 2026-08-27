@@ -1,9 +1,10 @@
-//! D01: Owner login — form POST, JWT issuance, httpOnly cookie.
-//! Lives in `web` (not `api`): web owns all cookie/browser-facing flows.
-//!
-//! Cookie: httpOnly + Secure + SameSite=Lax, 7-day sliding window.
-//! Cookie renewal on every authenticated request where remaining life < 6 days
-//! is handled separately in `api::extractors::auth` (T05/D01 resolution).
+//! D01 / T20: Owner/Manager login — form POST, JWT issuance, httpOnly cookie.
+//! T20: queries `users` table (replaces `owners`). JWT now carries `role`.
+//!      Owners get all branch_ids from `branches WHERE created_by_user_id`
+//!      **plus** all branch_ids granted to them (Owner may also have access
+//!      grants for other Owners' branches in future — kept simple for now:
+//!      Owners get every branch in the deployment).
+//!      Managers get only their `user_branch_access` rows.
 
 use axum::{
     extract::State,
@@ -25,7 +26,6 @@ use crate::routes::logout::current_token_version;
 const COOKIE_LIFETIME_DAYS: i64 = 7;
 
 pub async fn render_login(jar: CookieJar) -> Response {
-    // Already logged in? Bounce to dashboard.
     if jar.get("auth").is_some() {
         return Redirect::to("/").into_response();
     }
@@ -53,21 +53,18 @@ async fn authenticate(
     state: &AppState,
     form: &LoginForm,
 ) -> Result<(CookieJar, Redirect), String> {
-    let row: Option<(uuid::Uuid, String, Vec<uuid::Uuid>, i32)> = sqlx::query_as(
-        "SELECT o.id, o.password_hash,
-                COALESCE(ARRAY_AGG(b.id) FILTER (WHERE b.id IS NOT NULL), '{}'),
-                o.token_version
-         FROM owners o
-         LEFT JOIN branches b ON b.owner_id = o.id
-         WHERE o.email = $1
-         GROUP BY o.id",
+    // T20: query users table; fetch role and token_version.
+    let row: Option<(uuid::Uuid, String, String, i32)> = sqlx::query_as(
+        "SELECT id, password_hash, role, token_version \
+         FROM users \
+         WHERE email = $1",
     )
     .bind(&form.email)
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| format!("DB error: {e}"))?;
 
-    let (owner_id, hash, branch_ids, token_version) =
+    let (user_id, hash, role, token_version) =
         row.ok_or_else(|| "Invalid email or password.".to_string())?;
 
     let valid = bcrypt::verify(&form.password, &hash)
@@ -77,17 +74,35 @@ async fn authenticate(
         return Err("Invalid email or password.".to_string());
     }
 
-    let jar = issue_jwt_cookie(jar_from_jar(), owner_id, branch_ids, token_version)?;
-    Ok((jar, Redirect::to("/")))
-}
+    // T20: branch_ids depends on role.
+    let branch_ids: Vec<uuid::Uuid> = if role == "owner" {
+        // Owners see ALL branches in the deployment.
+        sqlx::query_scalar("SELECT id FROM branches ORDER BY created_at ASC")
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?
+    } else {
+        // Managers see only their granted branches.
+        sqlx::query_scalar(
+            "SELECT branch_id FROM user_branch_access WHERE user_id = $1 ORDER BY granted_at ASC",
+        )
+        .bind(user_id)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?
+    };
 
-fn jar_from_jar() -> CookieJar {
-    CookieJar::new()
+    let jar = issue_jwt_cookie(CookieJar::new(), user_id, role, branch_ids, token_version)?;
+
+    // Owners with no branches go to /branches (T12 zero-branch page).
+    // Managers with no branches are an admin error — still send to /branches.
+    Ok((jar, Redirect::to("/")))
 }
 
 fn issue_jwt_cookie(
     jar: CookieJar,
-    owner_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    role: String,
     branch_ids: Vec<uuid::Uuid>,
     token_version: i32,
 ) -> Result<CookieJar, String> {
@@ -96,7 +111,8 @@ fn issue_jwt_cookie(
     let exp = (chrono::Utc::now() + chrono::Duration::days(COOKIE_LIFETIME_DAYS)).timestamp() as usize;
 
     let claims = Claims {
-        sub: owner_id,
+        sub: user_id,
+        role,
         branch_ids,
         exp,
         token_version,
@@ -112,7 +128,7 @@ fn issue_jwt_cookie(
     let cookie = Cookie::build(("auth", token))
         .path("/")
         .http_only(true)
-        .secure(std::env::var("APP_ENV").as_deref() == Ok("production")) // only Secure in prod
+        .secure(std::env::var("APP_ENV").as_deref() == Ok("production"))
         .same_site(SameSite::Lax)
         .max_age(Duration::days(COOKIE_LIFETIME_DAYS))
         .build();
@@ -121,12 +137,17 @@ fn issue_jwt_cookie(
 }
 
 /// Re-issues a fresh JWT cookie for sliding window renewal.
-/// Called by auth extractor when remaining life < 6 days (D01 resolution).
 pub fn renew_cookie(
     jar: CookieJar,
     claims: &Claims,
 ) -> Result<CookieJar, String> {
-    issue_jwt_cookie(jar, claims.sub, claims.branch_ids.clone(), claims.token_version)
+    issue_jwt_cookie(
+        jar,
+        claims.sub,
+        claims.role.clone(),
+        claims.branch_ids.clone(),
+        claims.token_version,
+    )
 }
 
 fn login_page_html(error: Option<&str>) -> Html<String> {

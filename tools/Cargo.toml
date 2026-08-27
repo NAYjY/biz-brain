@@ -4,11 +4,16 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Dev tooling — seed script, etc."
+description = "Dev tooling — seed (admin bootstrap), create-owner, etc."
 
 [[bin]]
 name = "seed"
 path = "src/seed.rs"
+
+# T13/T20: Owner creation CLI (alternative to Admin UI).
+[[bin]]
+name = "create-owner"
+path = "src/create_owner.rs"
 
 [dependencies]
 tokio.workspace = true
