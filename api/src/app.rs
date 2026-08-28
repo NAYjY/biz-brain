@@ -1,5 +1,5 @@
-//! T05 / P04 / P16 / T20: REST endpoints, webhooks, SSE.
-//! T20: Admin routes (/admin/owners) and Manager management endpoints added.
+//! T05 / P04 / P16 / T20 / T13: REST endpoints, webhooks, SSE.
+//! T13: /api/v1/account/change-password added.
 
 use axum::{
     routing::{delete, get, patch, post},
@@ -88,7 +88,9 @@ pub fn build_router() -> Router<AppState> {
             patch(routes::branches::set_ai_provider),
         )
         // T20: Manager creation (Owner-only, not branch-scoped)
-        .route("/managers", post(routes::branches::create_manager));
+        .route("/managers", post(routes::branches::create_manager))
+        // T13: account settings (any authenticated user)
+        .route("/account/change-password", post(routes::account::change_password));
 
     let webhooks = Router::new()
         .route("/webhooks/line", post(routes::webhooks::line_webhook))

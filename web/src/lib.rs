@@ -1,5 +1,6 @@
-//! Web crate (T06 / D01-D07 / T20): SSR dashboard.
+//! Web crate (T06 / D01-D07 / T20 / T13): SSR dashboard.
 //! T20: Admin routes added (/admin/login, /admin/owners).
+//! T13: /account/settings and /branches routes added.
 //!      /setup redirect removed — zero-branch state handled by /branches (T12).
 
 #![warn(clippy::all)]
@@ -22,6 +23,10 @@ pub fn build_router() -> Router<AppState> {
         .route("/logout", post(routes::logout::logout))
         // D02: root redirects to first branch (or /branches if none)
         .route("/", get(routes::dashboard::render_dashboard))
+        // T12/T13: branch list + create (zero-branch landing)
+        .route("/branches", get(routes::branches::render_branches))
+        // T13: account settings (change password)
+        .route("/account/settings", get(routes::account::render_account_settings))
         // D04: Orders page
         .route("/branches/:branch_id/orders", get(routes::orders::render_orders))
         // D05: Supply Requests page
@@ -35,5 +40,4 @@ pub fn build_router() -> Router<AppState> {
         .route("/branches/:branch_id/actors", get(routes::actors::render_actors))
         // T07: browser-facing SSE relay
         .route("/branches/:branch_id/events", get(routes::sse_relay::relay_branch_events))
-
 }

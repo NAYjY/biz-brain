@@ -1,9 +1,5 @@
 //! Worker onboarding page.
-//!
-//! Shows all Workers for the Branch with their LINE binding status.
-//! Owner creates a Worker row here, then tells the Worker to message the
-//! LINE bot — inbox_worker sees the unknown sender and creates a pending
-//! binding. Owner then goes to /actors to confirm it.
+//! T12/T13: topbar now passes branch name + list for switcher.
 
 use axum::{
     extract::{Path, State},
@@ -14,8 +10,8 @@ use uuid::Uuid;
 
 use api::AppState;
 
-use crate::auth::{auth_error_response, authorize_branch};
-use crate::templates::{shell_close, shell_open, topbar_html, page_not_found};
+use crate::auth::{auth_error_response, authorize_branch, BranchAuthOutcome};
+use crate::templates::{load_topbar_data, shell_close, shell_open, topbar_html, page_not_found};
 
 pub async fn render_workers(
     Path(branch_id): Path<Uuid>,
@@ -27,7 +23,13 @@ pub async fn render_workers(
         return err;
     }
 
-    // First paint: query workers + binding status directly
+    let claims = match authorize_branch(&jar, &state.pool, branch_id).await {
+        BranchAuthOutcome::Authorized { claims, .. } => claims,
+        _ => return axum::response::Redirect::to("/login").into_response(),
+    };
+
+    let (branch_name, all_branches) = load_topbar_data(&state.pool, branch_id, &claims).await;
+
     let rows: Vec<(Uuid, String, Option<String>, Option<String>)> = match sqlx::query_as(
         "SELECT w.id, w.name, ad.channel, ad.external_id \
          FROM workers w \
@@ -53,9 +55,12 @@ pub async fn render_workers(
         r#"<tr><td colspan="4" class="data-table__empty">No workers yet. Create one to get started.</td></tr>"#
             .to_string()
     } else {
-        rows.iter().map(|(id, name, channel, external_id)| {
-            worker_row_html(*id, name, channel.as_deref(), external_id.as_deref())
-        }).collect::<Vec<_>>().join("\n")
+        rows.iter()
+            .map(|(id, name, channel, external_id)| {
+                worker_row_html(*id, name, channel.as_deref(), external_id.as_deref())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     };
 
     let html = format!(
@@ -130,7 +135,7 @@ pub async fn render_workers(
 <script>initWorkersPage('{branch_id}');</script>
 {shell_close}"#,
         shell_open = shell_open("Workers — Biz-Brain"),
-        topbar = topbar_html(branch_id, "workers"),
+        topbar = topbar_html(branch_id, &branch_name, &all_branches, "workers"),
         branch_id = branch_id,
         rows_html = rows_html,
         shell_close = shell_close(),
@@ -142,10 +147,18 @@ pub async fn render_workers(
 fn worker_row_html(id: Uuid, name: &str, channel: Option<&str>, external_id: Option<&str>) -> String {
     let (binding_cell, channel_cell) = match (channel, external_id) {
         (Some(ch), Some(ext)) => {
-            let label = match ch { "line" => "LINE", "whats_app" => "WhatsApp", other => other };
+            let label = match ch {
+                "line" => "LINE",
+                "whats_app" => "WhatsApp",
+                "telegram" => "Telegram",
+                other => other,
+            };
             (
-                format!(r#"<span class="channel-badge channel-badge--{}">{}</span>"#,
-                    ch.replace('_', "-"), label),
+                format!(
+                    r#"<span class="channel-badge channel-badge--{}">{}</span>"#,
+                    ch.replace('_', "-"),
+                    label
+                ),
                 format!(r#"<span class="font-mono text-xs">{}</span>"#, html_escape(ext)),
             )
         }

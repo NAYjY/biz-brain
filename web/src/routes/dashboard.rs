@@ -1,6 +1,7 @@
 //! D02/D03: Root `/` handler. Decodes cookie and redirects to the Owner's
 //! first Branch orders page. No standalone "dashboard" view — Orders and
 //! SupplyRequests are the dashboard (separate pages per D03).
+//! T13: zero-branch state redirects to /branches (replaces /setup).
 
 use axum::{
     extract::State,
@@ -12,7 +13,7 @@ use jsonwebtoken::{decode, DecodingKey, Validation};
 use api::{extractors::Claims, AppState};
 
 pub async fn render_dashboard(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     jar: CookieJar,
 ) -> Response {
     // No cookie -> login.
@@ -21,17 +22,21 @@ pub async fn render_dashboard(
     };
 
     let secret = std::env::var("JWT_SECRET").unwrap_or_default();
-    let Ok(data) = decode::<Claims>(&token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default()) else {
+    let Ok(data) = decode::<Claims>(
+        &token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    ) else {
         return Redirect::to("/login").into_response();
     };
 
     let claims = data.claims;
 
-    // First owned Branch -> orders. If none, need to create one first.
+    // First owned Branch -> orders.
+    // T13: zero-branch state goes to /branches (replaces the old /setup redirect).
     if let Some(&branch_id) = claims.branch_ids.first() {
         Redirect::to(&format!("/branches/{branch_id}/orders")).into_response()
     } else {
-        // Owner has no branches yet — show a minimal setup page.
-        Redirect::to("/setup").into_response()
+        Redirect::to("/branches").into_response()
     }
 }

@@ -1,5 +1,6 @@
-//! API crate (T05 / T20): Axum HTTP surface for the Owner dashboard, webhooks, SSE.
+//! API crate (T05 / T20 / T13): Axum HTTP surface for the Owner dashboard, webhooks, SSE.
 //! T20: AdminClaims and AuthedAdmin added.
+//! T13: account module added (change-password endpoint).
 //! F05: alert_worker module added.
 
 #![warn(clippy::all)]

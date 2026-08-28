@@ -1,4 +1,6 @@
+pub mod account;
 pub mod actors;
+pub mod branches;
 pub mod dashboard;
 pub mod login;
 pub mod logout;

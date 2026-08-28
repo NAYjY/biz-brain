@@ -1,6 +1,7 @@
 //! D04 / P16 / F04 / F01: Orders view — SSR initial render.
 //! F04: inline worker-message bubble removed; thread button with unread badge added.
 //! F01: short_name tag in row, nudge banner when workers have 3+ unnamed active orders.
+//! T12/T13: topbar now passes branch name + list for switcher.
 
 use axum::{
     extract::{Path, State},
@@ -11,8 +12,8 @@ use uuid::Uuid;
 
 use api::AppState;
 
-use crate::auth::{auth_error_response, authorize_branch};
-use crate::templates::{page_not_found, shell_close, shell_open, topbar_html};
+use crate::auth::{auth_error_response, authorize_branch, BranchAuthOutcome};
+use crate::templates::{load_topbar_data, page_not_found, shell_close, shell_open, topbar_html};
 
 pub async fn render_orders(
     Path(branch_id): Path<Uuid>,
@@ -23,6 +24,14 @@ pub async fn render_orders(
     if let Some(err) = auth_error_response(outcome) {
         return err;
     }
+
+    // Extract claims for topbar data load — re-authorize to get claims.
+    let claims = match authorize_branch(&jar, &state.pool, branch_id).await {
+        BranchAuthOutcome::Authorized { claims, .. } => claims,
+        _ => return axum::response::Redirect::to("/login").into_response(),
+    };
+
+    let (branch_name, all_branches) = load_topbar_data(&state.pool, branch_id, &claims).await;
 
     let orders = match state.projections.orders_by_branch(branch_id).await {
         Ok(rows) => rows,
@@ -39,7 +48,6 @@ pub async fn render_orders(
         orders.iter().map(order_row_html).collect::<Vec<_>>().join("\n")
     };
 
-    // F01: build nudge banner if any worker has ≥3 active orders missing short_name.
     let nudge_html = build_nudge_banner(&orders);
 
     let html = format!(
@@ -145,7 +153,7 @@ pub async fn render_orders(
 {shell_close}
 "#,
         shell_open("Orders — Biz-Brain"),
-        topbar = topbar_html(branch_id, "orders"),
+        topbar = topbar_html(branch_id, &branch_name, &all_branches, "orders"),
         orders_rows_html = orders_rows_html,
         nudge_html = nudge_html,
         branch_id = branch_id,
@@ -163,7 +171,6 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
         None => "—".to_string(),
     };
 
-    // F01: short_name tag displayed before description when set.
     let name_prefix = match &o.short_name {
         Some(sn) => format!(
             r#"<span class="order-tag" title="Job name">{}</span> "#,
@@ -172,7 +179,6 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
         None => String::new(),
     };
 
-    // F04: thread button — only when a worker is assigned.
     let thread_btn = if o.worker_id.is_some() {
         let unread = o.unread_message_count;
         let badge = if unread > 0 {
@@ -190,7 +196,6 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
         String::new()
     };
 
-    // F04: AI low-confidence badge.
     let ai_badge = if o.ai_routed_low_confidence {
         r#"<span class="ai-badge" title="AI-routed with low confidence — review recommended">🤖?</span>"#
             .to_string()
@@ -199,7 +204,7 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     };
 
     format!(
-        r#"<tr data-order-id="{id}" data-state="{state}">
+        r#"<tr data-order-id="{id}" data-state="{state}" data-short-name="{short_name_escaped}" data-start-date="{start_date}" data-due-date="{due_date}">
   <td><span class="state-pill state-pill--{state_lower}">{state_display}</span></td>
   <td>{name_prefix}<span class="order-desc" id="desc-{id}">{desc}</span></td>
   <td class="text-muted text-xs">{customer}</td>
@@ -219,17 +224,17 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
         customer = &o.customer_id.to_string()[..8],
         worker = worker_cell,
         name_prefix = name_prefix,
+        short_name_escaped = html_escape(o.short_name.as_deref().unwrap_or("")),
+        start_date = o.start_date.map(|d| d.to_rfc3339()).unwrap_or_default(),
+        due_date = o.due_date.map(|d| d.to_rfc3339()).unwrap_or_default(),
         thread_btn = thread_btn,
         ai_badge = ai_badge,
     )
 }
 
-// ── F01: nudge banner ──────────────────────────────────────────────────────── //
-
 fn build_nudge_banner(orders: &[store::projection_tables::OrderCurrentState]) -> String {
     use std::collections::HashMap;
 
-    // Count active unnamed orders per worker.
     let active_states = ["ASSIGNED", "ACCEPTED", "PENDING_CLARIFICATION", "READY_FOR_PICKUP"];
     let mut worker_unnamed: HashMap<String, u32> = HashMap::new();
 
@@ -268,6 +273,21 @@ fn build_nudge_banner(orders: &[store::projection_tables::OrderCurrentState]) ->
         </div>"#,
         lines = html_escape(&lines),
     )
+}
+
+pub fn validate_short_name(raw: Option<&str>) -> Result<Option<String>, (axum::http::StatusCode, String)> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) if s.len() > 20 => Err((
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "short_name must be 20 characters or fewer".to_string(),
+        )),
+        Some(s) => Ok(Some(s.to_string())),
+    }
+}
+
+pub fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
 fn html_escape(s: &str) -> String {

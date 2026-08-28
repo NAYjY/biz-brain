@@ -1,4 +1,5 @@
 //! D05: SupplyRequests view — SSR initial render (D03 pattern).
+//! T12/T13: topbar now passes branch name + list for switcher.
 
 use axum::{
     extract::{Path, State},
@@ -10,7 +11,7 @@ use uuid::Uuid;
 use api::AppState;
 
 use crate::auth::{auth_error_response, authorize_branch, BranchAuthOutcome};
-use crate::templates::{shell_close, shell_open, topbar_html, page_not_found};
+use crate::templates::{load_topbar_data, shell_close, shell_open, topbar_html, page_not_found};
 
 pub async fn render_supply_requests(
     Path(branch_id): Path<Uuid>,
@@ -21,6 +22,13 @@ pub async fn render_supply_requests(
     if let Some(err) = auth_error_response(outcome) {
         return err;
     }
+
+    let claims = match authorize_branch(&jar, &state.pool, branch_id).await {
+        BranchAuthOutcome::Authorized { claims, .. } => claims,
+        _ => return axum::response::Redirect::to("/login").into_response(),
+    };
+
+    let (branch_name, all_branches) = load_topbar_data(&state.pool, branch_id, &claims).await;
 
     let supply_requests = match state.projections.supply_requests_by_branch(branch_id).await {
         Ok(rows) => rows,
@@ -36,7 +44,7 @@ pub async fn render_supply_requests(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    
+
     let html = format!(
         r#"{}
 {topbar}
@@ -109,6 +117,7 @@ pub async fn render_supply_requests(
         <label class="form-label">Invoice</label>
         <select class="form-select" id="approve-invoice-select"></select>
       </div>
+      <div id="invoice-media-preview" style="margin-top:var(--space-3);"></div>
     </div>
     <div class="modal__footer">
       <button class="btn btn--ghost" onclick="BB.closeModal('approve-invoice-modal')">Cancel</button>
@@ -123,7 +132,7 @@ pub async fn render_supply_requests(
 <script>initSupplyRequestsPage('{branch_id}');</script>
 {shell_close}"#,
         shell_open("Supply Requests — Biz-Brain"),
-        topbar = topbar_html(branch_id, "supply-requests"),
+        topbar = topbar_html(branch_id, &branch_name, &all_branches, "supply-requests"),
         rows_html = rows_html,
         branch_id = branch_id,
         shell_close = shell_close(),

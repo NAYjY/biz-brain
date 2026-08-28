@@ -1,9 +1,5 @@
 //! D08-5: Actors (pending Worker/Supplier bindings) page.
-//! SSR initial render — same D03 pattern as orders.rs.
-//!
-//! Owner sees every unconfirmed (channel, external_id) → actor mapping
-//! for this Branch and confirms or rejects each one.
-//! Until confirmed, messages from that sender are silently dropped (S06 fail-closed).
+//! T12/T13: topbar now passes branch name + list for switcher.
 
 use axum::{
     extract::{Path, State},
@@ -16,8 +12,8 @@ use api::AppState;
 use domain::BranchId;
 use store::PendingBinding;
 
-use crate::auth::{auth_error_response, authorize_branch};
-use crate::templates::{shell_close, shell_open, topbar_html, page_not_found};
+use crate::auth::{auth_error_response, authorize_branch, BranchAuthOutcome};
+use crate::templates::{load_topbar_data, shell_close, shell_open, topbar_html, page_not_found};
 
 pub async fn render_actors(
     Path(branch_id): Path<Uuid>,
@@ -28,6 +24,13 @@ pub async fn render_actors(
     if let Some(err) = auth_error_response(outcome) {
         return err;
     }
+
+    let claims = match authorize_branch(&jar, &state.pool, branch_id).await {
+        BranchAuthOutcome::Authorized { claims, .. } => claims,
+        _ => return axum::response::Redirect::to("/login").into_response(),
+    };
+
+    let (branch_name, all_branches) = load_topbar_data(&state.pool, branch_id, &claims).await;
 
     let bindings = match state.actors.list_pending(BranchId::new(branch_id)).await {
         Ok(rows) => rows,
@@ -76,8 +79,8 @@ pub async fn render_actors(
 <script src="/static/js/actors.js"></script>
 <script>initActorsPage('{branch_id}');</script>
 {shell_close}"#,
-        shell_open("Workers — Biz-Brain"),
-        topbar = topbar_html(branch_id, "actors"),
+        shell_open("Workers & Suppliers — Biz-Brain"),
+        topbar = topbar_html(branch_id, &branch_name, &all_branches, "actors"),
         rows_html = rows_html,
         branch_id = branch_id,
         shell_close = shell_close(),
@@ -90,6 +93,7 @@ fn binding_row_html(b: &PendingBinding) -> String {
     let channel_label = match b.channel.as_str() {
         "line"      => "LINE",
         "whats_app" => "WhatsApp",
+        "telegram"  => "Telegram",
         other       => other,
     };
     let actor_type_label = match b.actor_type.as_str() {

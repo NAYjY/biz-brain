@@ -1,3 +1,4 @@
+pub mod account;
 pub mod actors;
 pub mod alerts;
 pub mod branches;

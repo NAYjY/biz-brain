@@ -1,5 +1,7 @@
-//! D03 / T20: Branch-ownership auth check shared between `api`'s route
+//! D03 / T20 / T13: Branch-ownership auth check shared between `api`'s route
 //! extractors and `web`'s SSR handlers. T20: queries `users` table.
+//! T13: `decode_claims_from_jar` added for pages that don't need a branch check
+//!      (account settings, branches list).
 
 use axum::{
     http::StatusCode,
@@ -16,6 +18,13 @@ pub enum BranchAuthOutcome {
     Authorized { claims: Claims, branch_id: Uuid },
     Unauthenticated,
     Forbidden,
+}
+
+/// Decode JWT claims from cookie without any DB or branch check.
+/// Useful for pages that only need the user's identity (account settings, branch list).
+/// Returns None if the cookie is missing or the token is invalid/expired.
+pub fn decode_claims_from_jar(jar: &CookieJar) -> Option<Claims> {
+    decode_claims(jar)
 }
 
 /// Validates cookie → Claims → token_version → branch access.
@@ -49,9 +58,8 @@ fn decode_claims(jar: &CookieJar) -> Option<Claims> {
 }
 
 async fn token_version_valid(pool: &PgPool, claims: &Claims) -> bool {
-    // T20: users table (was owners).
     let Ok(row) = sqlx::query_as::<_, (i32,)>(
-        "SELECT token_version FROM users WHERE id = $1"
+        "SELECT token_version FROM users WHERE id = $1",
     )
     .bind(claims.sub)
     .fetch_optional(pool)
