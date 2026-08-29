@@ -1,10 +1,7 @@
-//! D01 / T20: Owner/Manager login — form POST, JWT issuance, httpOnly cookie.
+//! D01 / T20 / T13: Owner/Manager login — form POST, JWT issuance, httpOnly cookie.
 //! T20: queries `users` table (replaces `owners`). JWT now carries `role`.
-//!      Owners get all branch_ids from `branches WHERE created_by_user_id`
-//!      **plus** all branch_ids granted to them (Owner may also have access
-//!      grants for other Owners' branches in future — kept simple for now:
-//!      Owners get every branch in the deployment).
-//!      Managers get only their `user_branch_access` rows.
+//! T13 fix: render_login validates token_version before redirecting away,
+//!           preventing redirect loops after password change.
 
 use axum::{
     extract::State,
@@ -21,15 +18,51 @@ use serde::Deserialize;
 use time::Duration;
 
 use api::{extractors::Claims, AppState};
-use crate::routes::logout::current_token_version;
 
 const COOKIE_LIFETIME_DAYS: i64 = 7;
 
-pub async fn render_login(jar: CookieJar) -> Response {
-    if jar.get("auth").is_some() {
+pub async fn render_login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Response {
+    // Only skip the login page if the cookie is present AND the token_version
+    // is still valid in the DB. A stale cookie (after password change / logout)
+    // must show the login page, not redirect — that's what causes the loop.
+    if is_session_valid(&state, &jar).await {
         return Redirect::to("/").into_response();
     }
     login_page_html(None).into_response()
+}
+
+/// Returns true only when the cookie exists, the JWT is valid, AND the
+/// token_version in the DB still matches. Any failure → false (show login).
+async fn is_session_valid(state: &AppState, jar: &CookieJar) -> bool {
+    use jsonwebtoken::{decode, DecodingKey, Validation};
+
+    let Some(token) = jar.get("auth").map(|c| c.value().to_string()) else {
+        return false;
+    };
+
+    let secret = std::env::var("JWT_SECRET").unwrap_or_default();
+    let Ok(data) = decode::<Claims>(
+        &token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    ) else {
+        return false;
+    };
+
+    let claims = data.claims;
+
+    // DB check — must match current token_version.
+    let row: Option<(i32,)> =
+        sqlx::query_as("SELECT token_version FROM users WHERE id = $1")
+            .bind(claims.sub)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
+
+    row.map_or(false, |(v,)| v == claims.token_version)
 }
 
 #[derive(Deserialize)]
@@ -53,7 +86,6 @@ async fn authenticate(
     state: &AppState,
     form: &LoginForm,
 ) -> Result<(CookieJar, Redirect), String> {
-    // T20: query users table; fetch role and token_version.
     let row: Option<(uuid::Uuid, String, String, i32)> = sqlx::query_as(
         "SELECT id, password_hash, role, token_version \
          FROM users \
@@ -74,17 +106,16 @@ async fn authenticate(
         return Err("Invalid email or password.".to_string());
     }
 
-    // T20: branch_ids depends on role.
+    // Populate branch_ids based on role.
     let branch_ids: Vec<uuid::Uuid> = if role == "owner" {
-        // Owners see ALL branches in the deployment.
         sqlx::query_scalar("SELECT id FROM branches ORDER BY created_at ASC")
             .fetch_all(&state.pool)
             .await
             .map_err(|e| format!("DB error: {e}"))?
     } else {
-        // Managers see only their granted branches.
         sqlx::query_scalar(
-            "SELECT branch_id FROM user_branch_access WHERE user_id = $1 ORDER BY granted_at ASC",
+            "SELECT branch_id FROM user_branch_access \
+             WHERE user_id = $1 ORDER BY granted_at ASC",
         )
         .bind(user_id)
         .fetch_all(&state.pool)
@@ -94,8 +125,6 @@ async fn authenticate(
 
     let jar = issue_jwt_cookie(CookieJar::new(), user_id, role, branch_ids, token_version)?;
 
-    // Owners with no branches go to /branches (T12 zero-branch page).
-    // Managers with no branches are an admin error — still send to /branches.
     Ok((jar, Redirect::to("/")))
 }
 
@@ -108,7 +137,8 @@ fn issue_jwt_cookie(
 ) -> Result<CookieJar, String> {
     let secret = std::env::var("JWT_SECRET").map_err(|_| "JWT_SECRET unset".to_string())?;
 
-    let exp = (chrono::Utc::now() + chrono::Duration::days(COOKIE_LIFETIME_DAYS)).timestamp() as usize;
+    let exp = (chrono::Utc::now() + chrono::Duration::days(COOKIE_LIFETIME_DAYS)).timestamp()
+        as usize;
 
     let claims = Claims {
         sub: user_id,
@@ -136,26 +166,13 @@ fn issue_jwt_cookie(
     Ok(jar.add(cookie))
 }
 
-/// Re-issues a fresh JWT cookie for sliding window renewal.
-pub fn renew_cookie(
-    jar: CookieJar,
-    claims: &Claims,
-) -> Result<CookieJar, String> {
-    issue_jwt_cookie(
-        jar,
-        claims.sub,
-        claims.role.clone(),
-        claims.branch_ids.clone(),
-        claims.token_version,
-    )
-}
-
 fn login_page_html(error: Option<&str>) -> Html<String> {
     let error_html = error.map_or(String::new(), |msg| {
         format!(r#"<div class="error-banner">{}</div>"#, html_escape(msg))
     });
 
-    Html(format!(r#"<!DOCTYPE html>
+    Html(format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -184,7 +201,8 @@ fn login_page_html(error: Option<&str>) -> Html<String> {
   </div>
 </div>
 </body>
-</html>"#))
+</html>"#
+    ))
 }
 
 fn html_escape(s: &str) -> String {

@@ -1,5 +1,7 @@
-//! S04 / T20: logout bumps token_version in `users` table (was `owners`),
+//! S04 / T20 / T13: logout bumps token_version in `users` table,
 //! invalidating all outstanding JWTs for this account — Owner or Manager.
+//! T13 fix: cookie removal uses path("/") without secure flag mismatch
+//!           so it clears correctly in both dev (http) and prod (https).
 
 use axum::{
     extract::State,
@@ -13,6 +15,8 @@ pub async fn logout(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Response {
+    // Bump token_version so any cookie that wasn't cleared (e.g. another browser)
+    // is immediately invalidated on the next request.
     if let Some(cookie) = jar.get("auth") {
         let secret = std::env::var("JWT_SECRET").unwrap_or_default();
         if let Ok(data) = jsonwebtoken::decode::<api::extractors::Claims>(
@@ -20,9 +24,8 @@ pub async fn logout(
             &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
             &jsonwebtoken::Validation::default(),
         ) {
-            // T20: users table (was owners).
             let _ = sqlx::query(
-                "UPDATE users SET token_version = token_version + 1 WHERE id = $1"
+                "UPDATE users SET token_version = token_version + 1 WHERE id = $1",
             )
             .bind(data.claims.sub)
             .execute(&state.pool)
@@ -30,17 +33,18 @@ pub async fn logout(
         }
     }
 
-    let cleared = jar.remove(
-        axum_extra::extract::cookie::Cookie::build("auth")
-            .path("/")
-            .http_only(true)
-            .secure(true)
-            .same_site(axum_extra::extract::cookie::SameSite::Lax)
-            .max_age(time::Duration::ZERO)
-            .build(),
-    );
+    // Remove the cookie. Do NOT set `secure` here — the removal must match
+    // the cookie's path attribute only. Setting `secure` on removal can cause
+    // the browser to ignore it on http (dev), leaving the stale cookie in place
+    // and causing the redirect loop.
+    let removal = axum_extra::extract::cookie::Cookie::build(("auth", ""))
+        .path("/")
+        .http_only(true)
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .max_age(time::Duration::ZERO)
+        .build();
 
-    (cleared, Redirect::to("/login")).into_response()
+    (jar.remove(removal), Redirect::to("/login")).into_response()
 }
 
 /// Helper used by login route when issuing a fresh JWT.
@@ -48,7 +52,6 @@ pub async fn current_token_version(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
 ) -> Result<i32, sqlx::Error> {
-    // T20: users table.
     let row: (i32,) =
         sqlx::query_as("SELECT token_version FROM users WHERE id = $1")
             .bind(user_id)
