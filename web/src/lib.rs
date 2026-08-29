@@ -1,7 +1,8 @@
-//! Web crate (T06 / D01-D07 / T12 / T13 / T20): SSR dashboard.
+//! Web crate (T06 / D01-D07 / T12 / T13 / T20 / T10): SSR dashboard.
 //! T12: /branches route added (branch list + create).
 //! T13: /account/settings added.
 //! T20: Admin routes present.
+//! T10: /branches/:branch_id/suppliers added.
 
 #![warn(clippy::all)]
 
@@ -35,6 +36,8 @@ pub fn build_router() -> Router<AppState> {
         .route("/branches/:branch_id/orders",          get(routes::orders::render_orders))
         .route("/branches/:branch_id/supply-requests", get(routes::supply_requests::render_supply_requests))
         .route("/branches/:branch_id/workers",         get(routes::workers::render_workers))
+        // T10: Suppliers page
+        .route("/branches/:branch_id/suppliers",       get(routes::suppliers::render_suppliers))
         .route("/branches/:branch_id/actors",          get(routes::actors::render_actors))
         // T07: browser-facing SSE relay
         .route("/branches/:branch_id/events", get(routes::sse_relay::relay_branch_events))

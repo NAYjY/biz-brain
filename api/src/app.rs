@@ -1,4 +1,5 @@
 //! T05 / P04 / P16 / T20 / T13: REST endpoints, webhooks, SSE.
+//! T10: supplier routes added.
 //! T13: /api/v1/account/change-password added.
 
 use axum::{
@@ -20,6 +21,9 @@ pub fn build_router() -> Router<AppState> {
         // Workers
         .route("/workers", get(routes::workers::list_workers).post(routes::workers::create_worker))
         .route("/workers/:worker_id", delete(routes::workers::delete_worker))
+        // T10: Suppliers
+        .route("/suppliers", get(routes::suppliers::list_suppliers).post(routes::suppliers::create_supplier))
+        .route("/suppliers/:supplier_id", delete(routes::suppliers::delete_supplier))
         // Supply requests
         .route(
             "/supply-requests",

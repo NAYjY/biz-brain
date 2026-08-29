@@ -7,4 +7,5 @@ pub mod logout;
 pub mod orders;
 pub mod sse_relay;
 pub mod supply_requests;
+pub mod suppliers;
 pub mod workers;

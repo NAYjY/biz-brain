@@ -8,5 +8,6 @@ pub mod invoices;
 pub mod orders;
 pub mod sse;
 pub mod supply_requests;
+pub mod suppliers;
 pub mod webhooks;
 pub mod workers;

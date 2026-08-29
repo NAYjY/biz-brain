@@ -3,6 +3,7 @@
 //! F01: adds f01_order_tag.css to shell_open.
 //! T12/T13: topbar_html gains branch switcher dropdown + Account link.
 //!           load_topbar_data() fetches branch name + list for the switcher.
+//! T10: Suppliers nav item added.
 
 use axum::response::{Html, IntoResponse, Response};
 use sqlx::PgPool;
@@ -75,7 +76,8 @@ pub async fn load_topbar_data(
 /// `branch_id`    — current branch (used for nav links)
 /// `branch_name`  — display name shown in the switcher
 /// `all_branches` — full list of accessible branches (id, name)
-/// `active_page`  — which nav link to highlight
+/// `active_page`  — which nav link to highlight ("orders", "supply-requests",
+///                  "workers", "suppliers", "actors")
 pub fn topbar_html(
     branch_id: Uuid,
     branch_name: &str,
@@ -132,6 +134,7 @@ pub fn topbar_html(
       {orders}
       {supply}
       {workers}
+      {suppliers}
       {actors}
     </ul>
   </nav>
@@ -172,10 +175,11 @@ pub fn topbar_html(
 }}
 </style>"#,
         switcher_html = switcher_html,
-        orders  = nav_item("/orders",          "Orders",           "orders"),
-        supply  = nav_item("/supply-requests", "Supply",           "supply-requests"),
-        workers = nav_item("/workers",         "Workers",          "workers"),
-        actors  = nav_item("/actors",          "Pending Bindings", "actors"),
+        orders    = nav_item("/orders",          "Orders",           "orders"),
+        supply    = nav_item("/supply-requests", "Supply",           "supply-requests"),
+        workers   = nav_item("/workers",         "Workers",          "workers"),
+        suppliers = nav_item("/suppliers",       "Suppliers",        "suppliers"),
+        actors    = nav_item("/actors",          "Pending Bindings", "actors"),
     )
 }
 
