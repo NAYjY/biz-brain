@@ -343,6 +343,61 @@ fn build_preamble(
             .join("\n")
     };
 
+    let variant_guide = if actor_role == "worker" {
+        r#"What each variant means and when it is valid:
+  worker_accepted         — Worker agrees to take the order.
+                            Valid when state = worker_assigned.
+                            Signals: รับงาน, รับ, โอเค, ok, sure, ได้, รับทราบ (when bot just asked to accept/reject)
+  worker_unavailable      — Worker cannot do this order.
+                            Valid when state = worker_assigned.
+                            Signals: ไม่ว่าง, ไม่รับ, can't, cannot, ไม่ได้ (when declining the order)
+  worker_cancelled        — Worker backs out after already accepting.
+                            Valid when state = worker_accepted, clarification_requested.
+                            Signals: ยกเลิก, ขอยกเลิก, cancel
+  clarification_requested — Worker has a question or does not understand the job.
+                            Valid when state = worker_assigned, worker_accepted.
+                            Signals: ถาม, ไม่เข้าใจ, question, ?, what is, ขอถาม
+  worker_ready_for_pickup — Worker is physically ready to collect materials.
+                            Valid when state = worker_accepted, clarification_requested.
+                            Signals: พร้อม, พร้อมรับ, ready, on my way to pick up
+  order_done              — Worker reports the job is complete.
+                            Valid when state = worker_ready_for_pickup, worker_accepted.
+                            Signals: เสร็จ, เสร็จแล้ว, เรียบร้อย, done, finished, complete
+  none                    — Message is irrelevant: greeting, noise, or unrelated chatter.
+                            Use when no variant fits or state does not allow any valid transition."#
+    } else {
+        r#"What each variant means and when it is valid:
+  invoice_received   — Supplier is sending or referencing an invoice or price quote.
+                       Signals: invoice, ใบเสนอราคา, ราคา, here is the quote
+  supplier_confirmed — Supplier confirms they will fulfil the supply request.
+                       Signals: ยืนยัน, ยืนยันแล้ว, confirmed, will do
+  none               — Message is irrelevant or does not map to any variant."#
+    };
+
+    let tie_breaking = if actor_role == "worker" {
+        r#"Tie-breaking rules for ambiguous messages:
+  - รับทราบ / ทราบแล้ว / noted / acknowledged
+      → If the last bot message asked the worker to accept or reject an order:
+          classify as worker_accepted (worker is acknowledging they accept)
+      → Otherwise: none
+  - โอเค / ok / sure / ได้
+      → If state = worker_assigned: worker_accepted
+      → If state = worker_accepted and bot asked about pickup: worker_ready_for_pickup
+      → Otherwise: none
+  - เสร็จ / done / เรียบร้อย
+      → If state = worker_ready_for_pickup or worker_accepted: order_done
+      → Otherwise: none
+  - พร้อม / ready
+      → If state = worker_accepted: worker_ready_for_pickup
+      → Otherwise: none
+  - Worker replies with an order name or number (e.g. "Work005")
+      → If the last bot message asked which order this is about:
+          set order_id to that order and classify based on prior context
+      → Otherwise: none"#
+    } else {
+        ""
+    };
+
     let few_shot = if actor_role == "worker" {
         worker_few_shot()
     } else {
@@ -357,11 +412,17 @@ The sender is {role_desc}.
 Their active orders RIGHT NOW:
 {context_list}
 
+{variant_guide}
+
+{tie_breaking}
+
 Your job:
-1. Classify the worker's LAST message into one of [{allowed_variants}]
-2. If the message clearly refers to a specific order (by name, description, or context), set order_id to that order's UUID
-3. If only ONE active order exists, assume the message is about that order
-4. If multiple orders exist and it's unclear which one, set order_id to null
+1. Read the full conversation history to understand context before classifying
+2. Classify the worker's LAST message into one of [{allowed_variants}]
+3. Use the current order state and the last bot message to resolve ambiguous signals
+4. If the message clearly refers to a specific order, set order_id to that order's UUID
+5. If only ONE active order exists, assume the message is about that order
+6. If multiple orders exist and it is unclear which one, set order_id to null
 
 Respond ONLY with valid JSON, nothing else:
 {{"variant": "<value>", "order_id": "<uuid or null>"}}
@@ -402,28 +463,34 @@ fn build_messages_array(
     history: &[HistoryMessage],
     new_message: &str,
 ) -> Vec<Value> {
-    // Build recent history as plain text context, not role-play turns
     let history_text = if history.is_empty() {
         String::new()
     } else {
-        let start = history.len().saturating_sub(5); // last 5 messages only
+        let start = history.len().saturating_sub(5);
         let lines: Vec<String> = history[start..]
             .iter()
             .map(|m| {
-                let role = if m.role == "user" { "Worker" } else { "Owner" };
+                // Clearly distinguish bot prompt from worker reply
+                let role = match m.role.as_str() {
+                    "user" => "Worker",
+                    "assistant" | "bot" => "Bot",
+                    _ => "Bot",
+                };
                 format!("{}: {}", role, m.content)
             })
             .collect();
         format!("\nRecent conversation:\n{}\n", lines.join("\n"))
     };
 
-    let full_prompt = format!("{}{}\nNow classify this message:", preamble, history_text);
+    let full_prompt = format!(
+        "{}{}\nNow classify this message:",
+        preamble, history_text
+    );
 
-    // Single user turn with everything in it, one model reply
     vec![
-        json!({ "role": "user", "parts": [{ "text": full_prompt }] }),
-        json!({ "role": "model", "parts": [{ "text": "Understood." }] }),
-        json!({ "role": "user", "parts": [{ "text": new_message }] }),
+        json!({ "role": "user", "content": full_prompt }),
+        json!({ "role": "assistant", "content": "Understood. I will classify using the full conversation context." }),
+        json!({ "role": "user", "content": new_message }),
     ]
 }
 
