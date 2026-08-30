@@ -2,6 +2,7 @@ pub mod account;
 pub mod actors;
 pub mod branches;
 pub mod dashboard;
+pub mod locale;
 pub mod login;
 pub mod logout;
 pub mod orders;

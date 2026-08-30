@@ -1,10 +1,10 @@
-//! D04 / P16 / F04 / F01 / T09: Orders view — SSR initial render (page 1 only).
-//! T09: SSR calls paginated store fn with no cursor (first 50 orders, no filter).
-//!      The browser takes over after first paint — filter bar + infinite scroll.
-//! T12/T13: topbar now passes branch name + list for switcher.
+//! D04 / P16 / F04 / F01 / T09 / T11: Orders view — SSR shell, fully translated.
+//! T11: all chrome strings go through Translations. JS i18n strings passed
+//!      as a data-i18n JSON attribute on the root div so orders.js can use them.
 
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Response},
 };
 use axum_extra::extract::CookieJar;
@@ -14,123 +14,154 @@ use api::AppState;
 use store::{OrderFilter, PaginatedProjections, PAGE_SIZE};
 
 use crate::auth::{auth_error_response, authorize_branch, BranchAuthOutcome};
-use crate::templates::{load_topbar_data, page_not_found, shell_close, shell_open, topbar_html};
+use crate::templates::{
+    html_escape, load_topbar_data, page_not_found, shell_close, shell_open,
+    topbar_html, translations_for,
+};
 
 pub async fn render_orders(
     Path(branch_id): Path<Uuid>,
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
 ) -> Response {
     let outcome = authorize_branch(&jar, &state.pool, branch_id).await;
-    if let Some(err) = auth_error_response(outcome) {
-        return err;
-    }
+    if let Some(err) = auth_error_response(outcome) { return err; }
 
     let claims = match authorize_branch(&jar, &state.pool, branch_id).await {
         BranchAuthOutcome::Authorized { claims, .. } => claims,
         _ => return axum::response::Redirect::to("/login").into_response(),
     };
 
+    let t = translations_for(&jar, &headers);
     let (branch_name, all_branches) = load_topbar_data(&state.pool, branch_id, &claims).await;
+    let current_path = format!("/branches/{branch_id}/orders");
 
-    // T09: page 1 only — no cursor, no filter.
     let paginator = PaginatedProjections::new(state.pool.clone());
     let (orders, first_next_cursor) = match paginator
         .orders_page(branch_id, None, &OrderFilter::default(), PAGE_SIZE)
         .await
     {
         Ok(result) => result,
-        Err(e) => {
-            eprintln!("orders page 1 query failed: {e:?}");
-            return page_not_found();
-        }
+        Err(e) => { eprintln!("orders page 1 query failed: {e:?}"); return page_not_found(); }
     };
 
-    // Encode next_cursor so the JS can pick up infinite scroll from page 2.
     let initial_cursor_json = first_next_cursor
         .map(|c| format!(r#""{}""#, c.encode()))
         .unwrap_or_else(|| "null".to_string());
 
     let orders_rows_html = if orders.is_empty() {
-        r#"<tr><td colspan="5" class="data-table__empty">No orders yet. Create one to get started.</td></tr>"#
-            .to_string()
+        format!(
+            r#"<tr><td colspan="5" class="data-table__empty">{}</td></tr>"#,
+            t.get("orders.empty")
+        )
     } else {
-        orders.iter().map(order_row_html).collect::<Vec<_>>().join("\n")
+        orders.iter().map(|o| order_row_html(o, &t)).collect::<Vec<_>>().join("\n")
     };
 
-    let nudge_html = build_nudge_banner(&orders);
+    let nudge_html = build_nudge_banner(&orders, &t);
+
+    // Build a JSON object of all strings the JS layer needs so we don't need
+    // a separate JS i18n bundle. Passed as window.BB_I18N.
+    let i18n_json = serde_json::json!({
+        "orders.empty":                  t.get("orders.empty"),
+        "orders.all_loaded":             t.get("orders.all_loaded"),
+        "orders.loading":                t.get("orders.loading"),
+        "orders.assign.title":           t.get("orders.assign.title"),
+        "orders.reassign.title":         t.get("orders.reassign.title"),
+        "orders.assign.placeholder":     t.get("orders.assign.placeholder"),
+        "orders.create.customer_placeholder": t.get("orders.create.customer_placeholder"),
+        "orders.filter.all_states":      t.get("orders.filter.all_states"),
+        "orders.filter.all_workers":     t.get("orders.filter.all_workers"),
+        "btn.cancel":                    t.get("btn.cancel"),
+        "btn.confirm":                   t.get("btn.confirm"),
+        "btn.save":                      t.get("btn.save"),
+        "btn.remove":                    t.get("btn.remove"),
+        "btn.send":                      t.get("btn.send"),
+        "btn.saving":                    t.get("btn.saving"),
+        "btn.sending":                   t.get("btn.sending"),
+        "thread.reply_placeholder":      t.get("thread.reply_placeholder"),
+        "thread.empty":                  t.get("thread.empty"),
+        "thread.label.worker":           t.get("thread.label.worker"),
+        "thread.label.owner":            t.get("thread.label.owner"),
+        "live.connecting":               t.get("live.connecting"),
+        "live.live":                     t.get("live.live"),
+        "live.reconnecting":             t.get("live.reconnecting"),
+        "state.unassigned":              t.get("state.unassigned"),
+        "state.assigned":                t.get("state.assigned"),
+        "state.accepted":                t.get("state.accepted"),
+        "state.pending_clarification":   t.get("state.pending_clarification"),
+        "state.unavailable":             t.get("state.unavailable"),
+        "state.ready_for_pickup":        t.get("state.ready_for_pickup"),
+        "state.done":                    t.get("state.done"),
+        "state.cancelled":               t.get("state.cancelled"),
+    });
 
     let html = format!(
-        r#"{}
+        r#"{shell_open}
 {topbar}
 <div class="page">
   <div class="page-header">
-    <h1>Orders</h1>
+    <h1>{title}</h1>
     <div style="display:flex;align-items:center;gap:1rem;">
       <div class="live-badge live-badge--disconnected" id="live-badge">
         <div class="live-badge__dot"></div>
-        <span class="live-badge__label">Connecting…</span>
+        <span class="live-badge__label">{connecting}</span>
       </div>
-      <button class="btn btn--primary" onclick="BB.openModal('create-order-modal')">+ New Order</button>
+      <button class="btn btn--primary" onclick="BB.openModal('create-order-modal')">{new_order}</button>
     </div>
   </div>
 
   {nudge_html}
 
-  <!-- T09: filter bar -->
   <div class="filter-bar" id="orders-filter-bar" style="
        display:flex;gap:var(--space-3);align-items:flex-end;
        flex-wrap:wrap;margin-bottom:var(--space-4);">
     <div class="form-group" style="margin-bottom:0;min-width:160px;">
-      <label class="form-label" for="filter-state">State</label>
+      <label class="form-label" for="filter-state">{filter_state_label}</label>
       <select class="form-select" id="filter-state">
-        <option value="">All states</option>
-        <option value="UNASSIGNED">Unassigned</option>
-        <option value="ASSIGNED">Assigned</option>
-        <option value="ACCEPTED">Accepted</option>
-        <option value="PENDING_CLARIFICATION">Pending Clarification</option>
-        <option value="UNAVAILABLE">Unavailable</option>
-        <option value="READY_FOR_PICKUP">Ready for Pickup</option>
-        <option value="DONE">Done</option>
-        <option value="CANCELLED">Cancelled</option>
+        <option value="">{filter_all_states}</option>
+        <option value="UNASSIGNED">{s_unassigned}</option>
+        <option value="ASSIGNED">{s_assigned}</option>
+        <option value="ACCEPTED">{s_accepted}</option>
+        <option value="PENDING_CLARIFICATION">{s_clarif}</option>
+        <option value="UNAVAILABLE">{s_unavail}</option>
+        <option value="READY_FOR_PICKUP">{s_ready}</option>
+        <option value="DONE">{s_done}</option>
+        <option value="CANCELLED">{s_cancelled}</option>
       </select>
     </div>
     <div class="form-group" style="margin-bottom:0;min-width:160px;">
-      <label class="form-label" for="filter-worker">Worker</label>
+      <label class="form-label" for="filter-worker">{filter_worker_label}</label>
       <select class="form-select" id="filter-worker">
-        <option value="">All workers</option>
+        <option value="">{filter_all_workers}</option>
       </select>
     </div>
     <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px;">
-      <label class="form-label" for="filter-q">Search</label>
+      <label class="form-label" for="filter-q">{filter_search_label}</label>
       <input class="form-input" id="filter-q" type="search"
-             placeholder="Description or job name…" autocomplete="off">
+             placeholder="{filter_placeholder}" autocomplete="off">
     </div>
-    <button class="btn btn--ghost" id="filter-clear-btn" style="margin-bottom:0;">Clear</button>
+    <button class="btn btn--ghost" id="filter-clear-btn" style="margin-bottom:0;">{filter_clear}</button>
   </div>
 
   <div class="card">
     <table class="data-table" id="orders-table">
       <thead>
         <tr>
-          <th>State</th>
-          <th>Description</th>
-          <th>Customer</th>
-          <th>Worker</th>
-          <th>Actions</th>
+          <th>{col_state}</th>
+          <th>{col_desc}</th>
+          <th>{col_customer}</th>
+          <th>{col_worker}</th>
+          <th>{col_actions}</th>
         </tr>
       </thead>
-      <tbody id="orders-tbody">
-        {orders_rows_html}
-      </tbody>
+      <tbody id="orders-tbody">{orders_rows_html}</tbody>
     </table>
-    <!-- T09: infinite scroll sentinel -->
     <div id="orders-scroll-sentinel" style="height:1px;"></div>
     <div id="orders-load-status" style="
          text-align:center;padding:var(--space-4);
-         font-size:var(--text-sm);color:var(--color-text-muted);
-         display:none;">
-    </div>
+         font-size:var(--text-sm);color:var(--color-text-muted);display:none;"></div>
   </div>
 </div>
 
@@ -138,38 +169,39 @@ pub async fn render_orders(
 <div class="modal-backdrop hidden" id="create-order-modal">
   <div class="modal">
     <div class="modal__header">
-      <span class="modal__title">New Order</span>
+      <span class="modal__title">{create_title}</span>
       <button class="btn btn--ghost btn--sm" onclick="BB.closeModal('create-order-modal')">✕</button>
     </div>
     <div class="modal__body">
       <div class="form-group">
-        <label class="form-label" for="order-customer">Customer</label>
+        <label class="form-label" for="order-customer">{create_customer}</label>
         <div style="display:flex;gap:.5rem;">
           <select class="form-select" id="order-customer" style="flex:1;"></select>
-          <button class="btn btn--ghost btn--sm" id="new-customer-btn">+ New</button>
+          <button class="btn btn--ghost btn--sm" id="new-customer-btn">{create_new_customer}</button>
         </div>
       </div>
       <div class="form-group" id="new-customer-row" style="display:none;">
-        <label class="form-label" for="new-customer-name">New customer name</label>
-        <input class="form-input" id="new-customer-name" type="text" placeholder="Customer name">
+        <label class="form-label" for="new-customer-name">{create_new_customer_name}</label>
+        <input class="form-input" id="new-customer-name" type="text"
+               placeholder="{create_customer_ph}">
       </div>
       <div class="form-group">
         <label class="form-label" for="order-short-name">
-          Job name <span class="text-muted" style="font-weight:400;">(optional, max 20 chars)</span>
+          {create_short_name} <span class="text-muted" style="font-weight:400;">{create_short_name_hint}</span>
         </label>
         <input class="form-input font-mono" id="order-short-name" type="text"
-               maxlength="20" autocomplete="off"
-               placeholder="e.g. AC-B3, ท่อชั้น2">
+               maxlength="20" autocomplete="off" placeholder="{create_short_name_ph}">
         <span class="text-xs text-muted" id="short-name-counter">0/20</span>
       </div>
       <div class="form-group">
-        <label class="form-label" for="order-description">Description</label>
-        <textarea class="form-textarea" id="order-description" placeholder="What needs doing?"></textarea>
+        <label class="form-label" for="order-description">{create_desc}</label>
+        <textarea class="form-textarea" id="order-description"
+                  placeholder="{create_desc_ph}"></textarea>
       </div>
     </div>
     <div class="modal__footer">
-      <button class="btn btn--ghost" onclick="BB.closeModal('create-order-modal')">Cancel</button>
-      <button class="btn btn--primary" id="create-order-btn">Create</button>
+      <button class="btn btn--ghost" onclick="BB.closeModal('create-order-modal')">{cancel}</button>
+      <button class="btn btn--primary" id="create-order-btn">{create_btn}</button>
     </div>
   </div>
 </div>
@@ -178,46 +210,84 @@ pub async fn render_orders(
 <div class="modal-backdrop hidden" id="assign-worker-modal">
   <div class="modal">
     <div class="modal__header">
-      <span class="modal__title" id="assign-worker-modal-title">Assign Worker</span>
+      <span class="modal__title" id="assign-worker-modal-title">{assign_title}</span>
       <button class="btn btn--ghost btn--sm" onclick="BB.closeModal('assign-worker-modal')">✕</button>
     </div>
     <div class="modal__body">
       <div class="form-group">
-        <label class="form-label" for="assign-worker-select">Worker</label>
+        <label class="form-label" for="assign-worker-select">{assign_label}</label>
         <select class="form-select" id="assign-worker-select"></select>
       </div>
     </div>
     <div class="modal__footer">
-      <button class="btn btn--ghost" onclick="BB.closeModal('assign-worker-modal')">Cancel</button>
-      <button class="btn btn--primary" id="assign-worker-btn">Confirm</button>
+      <button class="btn btn--ghost" onclick="BB.closeModal('assign-worker-modal')">{cancel}</button>
+      <button class="btn btn--primary" id="assign-worker-btn">{assign_btn}</button>
     </div>
   </div>
 </div>
 
+<script>window.BB_I18N = {i18n_json};</script>
 <script src="/static/js/ui.js"></script>
 <script src="/static/js/live.js"></script>
 <script src="/static/js/orders.js"></script>
 <script src="/static/js/f05_alerts.js"></script>
-<script>
-  // T09: pass the initial next_cursor from SSR so JS can continue from page 2.
-  initOrdersPage('{branch_id}', {initial_cursor});
-</script>
+<script>initOrdersPage('{branch_id}', {initial_cursor});</script>
 {shell_close}
 "#,
-        shell_open("Orders — Biz-Brain"),
-        topbar = topbar_html(branch_id, &branch_name, &all_branches, "orders"),
-        orders_rows_html = orders_rows_html,
-        nudge_html = nudge_html,
-        branch_id = branch_id,
-        initial_cursor = initial_cursor_json,
-        shell_close = shell_close(),
+        shell_open           = shell_open(t.get("orders.page_title"), t.lang()),
+        topbar               = topbar_html(branch_id, &branch_name, &all_branches, "orders", &t, &current_path),
+        title                = t.get("orders.title"),
+        connecting           = t.get("live.connecting"),
+        new_order            = t.get("orders.new"),
+        nudge_html           = nudge_html,
+        filter_state_label   = t.get("orders.filter.state"),
+        filter_all_states    = t.get("orders.filter.all_states"),
+        filter_worker_label  = t.get("orders.filter.worker"),
+        filter_all_workers   = t.get("orders.filter.all_workers"),
+        filter_search_label  = t.get("orders.filter.search"),
+        filter_placeholder   = t.get("orders.filter.placeholder"),
+        filter_clear         = t.get("orders.filter.clear"),
+        col_state            = t.get("orders.col.state"),
+        col_desc             = t.get("orders.col.description"),
+        col_customer         = t.get("orders.col.customer"),
+        col_worker           = t.get("orders.col.worker"),
+        col_actions          = t.get("orders.col.actions"),
+        s_unassigned         = t.get("state.unassigned"),
+        s_assigned           = t.get("state.assigned"),
+        s_accepted           = t.get("state.accepted"),
+        s_clarif             = t.get("state.pending_clarification"),
+        s_unavail            = t.get("state.unavailable"),
+        s_ready              = t.get("state.ready_for_pickup"),
+        s_done               = t.get("state.done"),
+        s_cancelled          = t.get("state.cancelled"),
+        orders_rows_html     = orders_rows_html,
+        create_title         = t.get("orders.create.title"),
+        create_customer      = t.get("orders.create.customer"),
+        create_new_customer  = t.get("orders.create.new_customer"),
+        create_new_customer_name = t.get("orders.create.new_customer_name"),
+        create_customer_ph   = t.get("orders.create.customer_placeholder"),
+        create_short_name    = t.get("orders.create.short_name"),
+        create_short_name_hint = t.get("orders.create.short_name_hint"),
+        create_short_name_ph = t.get("orders.create.short_name_placeholder"),
+        create_desc          = t.get("orders.create.description"),
+        create_desc_ph       = t.get("orders.create.description_placeholder"),
+        cancel               = t.get("btn.cancel"),
+        create_btn           = t.get("orders.create.btn"),
+        assign_title         = t.get("orders.assign.title"),
+        assign_label         = t.get("orders.assign.label"),
+        assign_btn           = t.get("orders.assign.btn"),
+        i18n_json            = i18n_json,
+        branch_id            = branch_id,
+        initial_cursor       = initial_cursor_json,
+        shell_close          = shell_close(),
     );
 
     Html(html).into_response()
 }
 
-fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
+fn order_row_html(o: &store::projection_tables::OrderCurrentState, t: &crate::i18n::Translations) -> String {
     let state_lower = o.state.to_lowercase();
+    let state_display = state_pill_label(&o.state, t);
 
     let worker_cell = match &o.worker_name {
         Some(name) => html_escape(name),
@@ -235,7 +305,7 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     let thread_btn = if o.worker_id.is_some() {
         let unread = o.unread_message_count;
         let badge = if unread > 0 {
-            format!(" <span class=\"thread-unread-badge\">{unread}</span>")
+            format!(r#" <span class="thread-unread-badge">{unread}</span>"#)
         } else {
             String::new()
         };
@@ -257,7 +327,9 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     };
 
     format!(
-        r#"<tr data-order-id="{id}" data-state="{state}" data-short-name="{short_name_escaped}" data-start-date="{start_date}" data-due-date="{due_date}">
+        r#"<tr data-order-id="{id}" data-state="{state}"
+            data-short-name="{short_name_escaped}"
+            data-start-date="{start_date}" data-due-date="{due_date}">
   <td><span class="state-pill state-pill--{state_lower}">{state_display}</span></td>
   <td>{name_prefix}<span class="order-desc" id="desc-{id}">{desc}</span></td>
   <td class="text-muted text-xs">{customer}</td>
@@ -269,23 +341,47 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState) -> String {
     </div>
   </td>
 </tr>"#,
-        id = o.id,
-        state = o.state,
-        state_lower = state_lower,
-        state_display = o.state.replace('_', " "),
-        desc = html_escape(&o.description),
-        customer = &o.customer_id.to_string()[..8],
-        worker = worker_cell,
-        name_prefix = name_prefix,
+        id                 = o.id,
+        state              = o.state,
+        state_lower        = state_lower,
+        state_display      = state_display,
+        desc               = html_escape(&o.description),
+        customer           = &o.customer_id.to_string()[..8],
+        worker             = worker_cell,
+        name_prefix        = name_prefix,
         short_name_escaped = html_escape(o.short_name.as_deref().unwrap_or("")),
-        start_date = o.start_date.map(|d| d.to_rfc3339()).unwrap_or_default(),
-        due_date = o.due_date.map(|d| d.to_rfc3339()).unwrap_or_default(),
-        thread_btn = thread_btn,
-        ai_badge = ai_badge,
+        start_date         = o.start_date.map(|d| d.to_rfc3339()).unwrap_or_default(),
+        due_date           = o.due_date.map(|d| d.to_rfc3339()).unwrap_or_default(),
+        thread_btn         = thread_btn,
+        ai_badge           = ai_badge,
     )
 }
 
-fn build_nudge_banner(orders: &[store::projection_tables::OrderCurrentState]) -> String {
+/// Map the raw DB state string to the translated pill label.
+fn state_pill_label(state: &str, t: &crate::i18n::Translations) -> String {
+    let key = match state {
+        "UNASSIGNED"            => "state.unassigned",
+        "ASSIGNED"              => "state.assigned",
+        "ACCEPTED"              => "state.accepted",
+        "PENDING_CLARIFICATION" => "state.pending_clarification",
+        "UNAVAILABLE"           => "state.unavailable",
+        "READY_FOR_PICKUP"      => "state.ready_for_pickup",
+        "DONE"                  => "state.done",
+        "CANCELLED"             => "state.cancelled",
+        "DRAFT"                 => "state.draft",
+        "SENT"                  => "state.sent",
+        "INVOICE_RECEIVED"      => "state.invoice_received",
+        "OWNER_APPROVED_INVOICE"=> "state.owner_approved_invoice",
+        "SUPPLIER_CONFIRMED"    => "state.supplier_confirmed",
+        _                       => return state.replace('_', " "),
+    };
+    t.get(key).to_string()
+}
+
+fn build_nudge_banner(
+    orders: &[store::projection_tables::OrderCurrentState],
+    t: &crate::i18n::Translations,
+) -> String {
     use std::collections::HashMap;
 
     let active_states = ["ASSIGNED", "ACCEPTED", "PENDING_CLARIFICATION", "READY_FOR_PICKUP"];
@@ -301,10 +397,11 @@ fn build_nudge_banner(orders: &[store::projection_tables::OrderCurrentState]) ->
         }
     }
 
+    let suffix = t.get("nudge.no_job_names");
     let offenders: Vec<String> = worker_unnamed
         .into_iter()
         .filter(|(_, count)| *count >= 3)
-        .map(|(name, count)| format!("{name} has {count} active orders without job names"))
+        .map(|(name, count)| format!("{name} ({count}) — {suffix}"))
         .collect();
 
     if offenders.is_empty() {
@@ -314,15 +411,11 @@ fn build_nudge_banner(orders: &[store::projection_tables::OrderCurrentState]) ->
     let lines = offenders.join("; ");
     format!(
         r#"<div class="nudge-banner" style="
-            background:var(--color-state-warn-bg);
-            border:1px solid var(--color-state-warn);
-            border-radius:var(--radius-sm);
-            padding:var(--space-3) var(--space-4);
-            font-size:var(--text-sm);
-            color:var(--color-state-warn);
-            margin-bottom:var(--space-4);
-            display:flex;align-items:center;gap:.5rem;">
-          ⚠️ {lines} — workers may struggle to identify them. Set job names via ⚙️ → Set job name.
+            background:var(--color-state-warn-bg);border:1px solid var(--color-state-warn);
+            border-radius:var(--radius-sm);padding:var(--space-3) var(--space-4);
+            font-size:var(--text-sm);color:var(--color-state-warn);
+            margin-bottom:var(--space-4);display:flex;align-items:center;gap:.5rem;">
+          ⚠️ {lines}
         </div>"#,
         lines = html_escape(&lines),
     )
@@ -341,8 +434,4 @@ pub fn validate_short_name(raw: Option<&str>) -> Result<Option<String>, (axum::h
 
 pub fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }

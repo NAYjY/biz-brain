@@ -1,8 +1,8 @@
-//! D08-5: Actors (pending Worker/Supplier bindings) page.
-//! T12/T13: topbar now passes branch name + list for switcher.
+//! D08-5 / T11: Actors (pending bindings) page — fully translated.
 
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Response},
 };
 use axum_extra::extract::CookieJar;
@@ -13,83 +13,89 @@ use domain::BranchId;
 use store::PendingBinding;
 
 use crate::auth::{auth_error_response, authorize_branch, BranchAuthOutcome};
-use crate::templates::{load_topbar_data, shell_close, shell_open, topbar_html, page_not_found};
+use crate::i18n::Translations;
+use crate::templates::{
+    html_escape, load_topbar_data, page_not_found, shell_close, shell_open,
+    topbar_html, translations_for,
+};
 
 pub async fn render_actors(
     Path(branch_id): Path<Uuid>,
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
 ) -> Response {
     let outcome = authorize_branch(&jar, &state.pool, branch_id).await;
-    if let Some(err) = auth_error_response(outcome) {
-        return err;
-    }
+    if let Some(err) = auth_error_response(outcome) { return err; }
 
     let claims = match authorize_branch(&jar, &state.pool, branch_id).await {
         BranchAuthOutcome::Authorized { claims, .. } => claims,
         _ => return axum::response::Redirect::to("/login").into_response(),
     };
 
+    let t = translations_for(&jar, &headers);
     let (branch_name, all_branches) = load_topbar_data(&state.pool, branch_id, &claims).await;
+    let current_path = format!("/branches/{branch_id}/actors");
 
     let bindings = match state.actors.list_pending(BranchId::new(branch_id)).await {
         Ok(rows) => rows,
-        Err(e) => {
-            eprintln!("actors list_pending failed: {e:?}");
-            return page_not_found();
-        }
+        Err(e) => { eprintln!("actors list_pending failed: {e:?}"); return page_not_found(); }
     };
 
     let rows_html = if bindings.is_empty() {
-        r#"<tr><td colspan="5" class="data-table__empty">No pending bindings. When a new Worker or Supplier messages for the first time, they appear here.</td></tr>"#.to_string()
+        format!(
+            r#"<tr><td colspan="5" class="data-table__empty">{}</td></tr>"#,
+            t.get("actors.empty")
+        )
     } else {
-        bindings.iter().map(binding_row_html).collect::<Vec<_>>().join("\n")
+        bindings.iter().map(|b| binding_row_html(b, &t)).collect::<Vec<_>>().join("\n")
     };
 
     let html = format!(
-        r#"{}
+        r#"{shell_open}
 {topbar}
 <div class="page">
   <div class="page-header">
-    <h1>Workers &amp; Suppliers</h1>
-    <p class="text-sm text-muted" style="margin-top:.25rem;">
-      Confirm a binding to trust that sender. Reject to remove it — their next message creates a new pending row.
-    </p>
+    <h1>{title}</h1>
+    <p class="text-sm text-muted" style="margin-top:.25rem;">{subtitle}</p>
   </div>
-
   <div class="card">
     <table class="data-table" id="actors-table">
       <thead>
         <tr>
-          <th>Channel</th>
-          <th>Sender ID</th>
-          <th>Type</th>
-          <th>First seen</th>
-          <th>Actions</th>
+          <th>{col_channel}</th>
+          <th>{col_sender}</th>
+          <th>{col_type}</th>
+          <th>{col_seen}</th>
+          <th>{col_actions}</th>
         </tr>
       </thead>
-      <tbody id="actors-tbody">
-        {rows_html}
-      </tbody>
+      <tbody id="actors-tbody">{rows_html}</tbody>
     </table>
   </div>
 </div>
-
 <script src="/static/js/ui.js"></script>
 <script src="/static/js/actors.js"></script>
 <script>initActorsPage('{branch_id}');</script>
 {shell_close}"#,
-        shell_open("Workers & Suppliers — Biz-Brain"),
-        topbar = topbar_html(branch_id, &branch_name, &all_branches, "actors"),
-        rows_html = rows_html,
-        branch_id = branch_id,
+        shell_open  = shell_open(t.get("actors.page_title"), t.lang()),
+        topbar      = topbar_html(branch_id, &branch_name, &all_branches, "actors", &t, &current_path),
+        title       = t.get("actors.title"),
+        subtitle    = t.get("actors.subtitle"),
+        col_channel = t.get("actors.col.channel"),
+        col_sender  = t.get("actors.col.sender"),
+        col_type    = t.get("actors.col.type"),
+        col_seen    = t.get("actors.col.seen"),
+        col_actions = t.get("actors.col.actions"),
+        rows_html   = rows_html,
+        branch_id   = branch_id,
         shell_close = shell_close(),
     );
 
     Html(html).into_response()
 }
 
-fn binding_row_html(b: &PendingBinding) -> String {
+fn binding_row_html(b: &PendingBinding, t: &Translations) -> String {
     let channel_label = match b.channel.as_str() {
         "line"      => "LINE",
         "whats_app" => "WhatsApp",
@@ -97,8 +103,8 @@ fn binding_row_html(b: &PendingBinding) -> String {
         other       => other,
     };
     let actor_type_label = match b.actor_type.as_str() {
-        "worker"   => "Worker",
-        "supplier" => "Supplier",
+        "worker"   => t.get("actors.type.worker"),
+        "supplier" => t.get("actors.type.supplier"),
         other      => other,
     };
     let created = b.created_at.format("%Y-%m-%d %H:%M UTC").to_string();
@@ -111,8 +117,8 @@ fn binding_row_html(b: &PendingBinding) -> String {
   <td class="text-muted text-xs">{created}</td>
   <td>
     <div style="display:flex;gap:.5rem;">
-      <button class="btn btn--primary btn--sm" onclick="actorConfirm('{id}')">Confirm</button>
-      <button class="btn btn--ghost btn--sm"   onclick="actorReject('{id}')">Reject</button>
+      <button class="btn btn--primary btn--sm" onclick="actorConfirm('{id}')">{confirm}</button>
+      <button class="btn btn--ghost btn--sm"   onclick="actorReject('{id}')">{reject}</button>
     </div>
   </td>
 </tr>"#,
@@ -122,9 +128,7 @@ fn binding_row_html(b: &PendingBinding) -> String {
         external_id  = html_escape(&b.external_id),
         actor_type   = actor_type_label,
         created      = created,
+        confirm      = t.get("actors.btn.confirm"),
+        reject       = t.get("actors.btn.reject"),
     )
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }

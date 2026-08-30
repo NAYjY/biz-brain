@@ -1,20 +1,19 @@
-//! D03/D07: shared HTML shell fragments used by all SSR page handlers.
-//! F04: adds f04_thread.css to shell_open.
-//! F01: adds f01_order_tag.css to shell_open.
-//! T12/T13: topbar_html gains branch switcher dropdown + Account link.
-//!           load_topbar_data() fetches branch name + list for the switcher.
-//! T10: Suppliers nav item added.
+//! D03/D07/T11: shared HTML shell fragments used by all SSR page handlers.
+//! T11: all chrome strings now go through `&Translations` — never hardcoded.
 
 use axum::response::{Html, IntoResponse, Response};
+use axum::http::HeaderMap;
+use axum_extra::extract::CookieJar;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use api::extractors::Claims;
+use crate::i18n::{locale_from_request, locale_switcher_html, Translations};
 
-pub fn shell_open(title: &str) -> String {
+pub fn shell_open(title: &str, lang: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="{lang}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -26,7 +25,8 @@ pub fn shell_open(title: &str) -> String {
 </head>
 <body>
 <div class="app-layout">"#,
-        title = html_escape(title)
+        title = html_escape(title),
+        lang = lang,
     )
 }
 
@@ -34,8 +34,12 @@ pub fn shell_close() -> &'static str {
     "</div></body></html>"
 }
 
+/// Resolve translations for a request. Call once at the top of every handler.
+pub fn translations_for(jar: &CookieJar, headers: &HeaderMap) -> Translations {
+    locale_from_request(jar, headers)
+}
+
 /// Load the current branch name and full branch list for the topbar switcher.
-/// Should be called once per SSR page handler.
 pub async fn load_topbar_data(
     pool: &PgPool,
     branch_id: Uuid,
@@ -71,18 +75,14 @@ pub async fn load_topbar_data(
     (name, branches)
 }
 
-/// Render the shared topbar with branch switcher and account link.
-///
-/// `branch_id`    — current branch (used for nav links)
-/// `branch_name`  — display name shown in the switcher
-/// `all_branches` — full list of accessible branches (id, name)
-/// `active_page`  — which nav link to highlight ("orders", "supply-requests",
-///                  "workers", "suppliers", "actors")
+/// Render the shared topbar with branch switcher, nav, account link, and locale switcher.
 pub fn topbar_html(
     branch_id: Uuid,
     branch_name: &str,
     all_branches: &[(Uuid, String)],
     active_page: &str,
+    t: &Translations,
+    current_path: &str,
 ) -> String {
     let nav_item = |href: &str, label: &str, page: &str| {
         let active = if active_page == page { " active" } else { "" };
@@ -95,7 +95,6 @@ pub fn topbar_html(
         )
     };
 
-    // Branch switcher — dropdown when multiple branches, plain label when one.
     let switcher_html = if all_branches.len() <= 1 {
         format!(
             r#"<span class="branch-switcher__name">{}</span>"#,
@@ -125,6 +124,8 @@ pub fn topbar_html(
         )
     };
 
+    let locale_switcher = locale_switcher_html(t.locale, current_path);
+
     format!(
         r#"<header class="topbar">
   <a href="/branches" class="topbar__wordmark" style="text-decoration:none;">Biz<span>·</span>Brain</a>
@@ -139,9 +140,10 @@ pub fn topbar_html(
     </ul>
   </nav>
   <div class="topbar__actions">
-    <a href="/account/settings" class="btn btn--ghost btn--sm">Account</a>
+    {locale_switcher}
+    <a href="/account/settings" class="btn btn--ghost btn--sm">{account}</a>
     <form method="POST" action="/logout" style="margin:0;">
-      <button class="btn btn--ghost btn--sm" type="submit">Sign out</button>
+      <button class="btn btn--ghost btn--sm" type="submit">{sign_out}</button>
     </form>
   </div>
 </header>
@@ -175,11 +177,14 @@ pub fn topbar_html(
 }}
 </style>"#,
         switcher_html = switcher_html,
-        orders    = nav_item("/orders",          "Orders",           "orders"),
-        supply    = nav_item("/supply-requests", "Supply",           "supply-requests"),
-        workers   = nav_item("/workers",         "Workers",          "workers"),
-        suppliers = nav_item("/suppliers",       "Suppliers",        "suppliers"),
-        actors    = nav_item("/actors",          "Pending Bindings", "actors"),
+        locale_switcher = locale_switcher,
+        orders    = nav_item("/orders",          t.get("nav.orders"),           "orders"),
+        supply    = nav_item("/supply-requests", t.get("nav.supply"),           "supply-requests"),
+        workers   = nav_item("/workers",         t.get("nav.workers"),          "workers"),
+        suppliers = nav_item("/suppliers",       t.get("nav.suppliers"),        "suppliers"),
+        actors    = nav_item("/actors",          t.get("nav.pending_bindings"), "actors"),
+        account   = t.get("nav.account"),
+        sign_out  = t.get("nav.sign_out"),
     )
 }
 

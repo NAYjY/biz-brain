@@ -1,12 +1,13 @@
-//! Web crate (T06 / D01-D07 / T12 / T13 / T20 / T10): SSR dashboard.
+//! Web crate (T06 / D01-D07 / T11 / T12 / T13 / T20 / T10): SSR dashboard.
+//! T11: i18n module + /locale switcher endpoint.
 //! T12: /branches route added (branch list + create).
 //! T13: /account/settings added.
-//! T20: Admin routes present.
 //! T10: /branches/:branch_id/suppliers added.
 
 #![warn(clippy::all)]
 
 pub mod auth;
+pub mod i18n;
 pub mod routes;
 pub mod templates;
 
@@ -22,6 +23,8 @@ pub fn build_router() -> Router<AppState> {
         // Auth
         .route("/login",  get(routes::login::render_login).post(routes::login::handle_login))
         .route("/logout", post(routes::logout::logout))
+        // T11: locale switcher
+        .route("/locale", post(routes::locale::set_locale))
         // Root → first branch or /branches
         .route("/", get(routes::dashboard::render_dashboard))
         // T12: branch list (GET) + create with JWT reissue (POST)
