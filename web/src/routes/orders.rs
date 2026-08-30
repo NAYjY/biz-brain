@@ -1,6 +1,6 @@
-//! D04 / P16 / F04 / F01: Orders view — SSR initial render.
-//! F04: inline worker-message bubble removed; thread button with unread badge added.
-//! F01: short_name tag in row, nudge banner when workers have 3+ unnamed active orders.
+//! D04 / P16 / F04 / F01 / T09: Orders view — SSR initial render (page 1 only).
+//! T09: SSR calls paginated store fn with no cursor (first 50 orders, no filter).
+//!      The browser takes over after first paint — filter bar + infinite scroll.
 //! T12/T13: topbar now passes branch name + list for switcher.
 
 use axum::{
@@ -11,6 +11,7 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 use api::AppState;
+use store::{OrderFilter, PaginatedProjections, PAGE_SIZE};
 
 use crate::auth::{auth_error_response, authorize_branch, BranchAuthOutcome};
 use crate::templates::{load_topbar_data, page_not_found, shell_close, shell_open, topbar_html};
@@ -25,7 +26,6 @@ pub async fn render_orders(
         return err;
     }
 
-    // Extract claims for topbar data load — re-authorize to get claims.
     let claims = match authorize_branch(&jar, &state.pool, branch_id).await {
         BranchAuthOutcome::Authorized { claims, .. } => claims,
         _ => return axum::response::Redirect::to("/login").into_response(),
@@ -33,13 +33,23 @@ pub async fn render_orders(
 
     let (branch_name, all_branches) = load_topbar_data(&state.pool, branch_id, &claims).await;
 
-    let orders = match state.projections.orders_by_branch(branch_id).await {
-        Ok(rows) => rows,
+    // T09: page 1 only — no cursor, no filter.
+    let paginator = PaginatedProjections::new(state.pool.clone());
+    let (orders, first_next_cursor) = match paginator
+        .orders_page(branch_id, None, &OrderFilter::default(), PAGE_SIZE)
+        .await
+    {
+        Ok(result) => result,
         Err(e) => {
-            eprintln!("orders query failed: {e:?}");
+            eprintln!("orders page 1 query failed: {e:?}");
             return page_not_found();
         }
     };
+
+    // Encode next_cursor so the JS can pick up infinite scroll from page 2.
+    let initial_cursor_json = first_next_cursor
+        .map(|c| format!(r#""{}""#, c.encode()))
+        .unwrap_or_else(|| "null".to_string());
 
     let orders_rows_html = if orders.is_empty() {
         r#"<tr><td colspan="5" class="data-table__empty">No orders yet. Create one to get started.</td></tr>"#
@@ -67,6 +77,38 @@ pub async fn render_orders(
 
   {nudge_html}
 
+  <!-- T09: filter bar -->
+  <div class="filter-bar" id="orders-filter-bar" style="
+       display:flex;gap:var(--space-3);align-items:flex-end;
+       flex-wrap:wrap;margin-bottom:var(--space-4);">
+    <div class="form-group" style="margin-bottom:0;min-width:160px;">
+      <label class="form-label" for="filter-state">State</label>
+      <select class="form-select" id="filter-state">
+        <option value="">All states</option>
+        <option value="UNASSIGNED">Unassigned</option>
+        <option value="ASSIGNED">Assigned</option>
+        <option value="ACCEPTED">Accepted</option>
+        <option value="PENDING_CLARIFICATION">Pending Clarification</option>
+        <option value="UNAVAILABLE">Unavailable</option>
+        <option value="READY_FOR_PICKUP">Ready for Pickup</option>
+        <option value="DONE">Done</option>
+        <option value="CANCELLED">Cancelled</option>
+      </select>
+    </div>
+    <div class="form-group" style="margin-bottom:0;min-width:160px;">
+      <label class="form-label" for="filter-worker">Worker</label>
+      <select class="form-select" id="filter-worker">
+        <option value="">All workers</option>
+      </select>
+    </div>
+    <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px;">
+      <label class="form-label" for="filter-q">Search</label>
+      <input class="form-input" id="filter-q" type="search"
+             placeholder="Description or job name…" autocomplete="off">
+    </div>
+    <button class="btn btn--ghost" id="filter-clear-btn" style="margin-bottom:0;">Clear</button>
+  </div>
+
   <div class="card">
     <table class="data-table" id="orders-table">
       <thead>
@@ -82,6 +124,13 @@ pub async fn render_orders(
         {orders_rows_html}
       </tbody>
     </table>
+    <!-- T09: infinite scroll sentinel -->
+    <div id="orders-scroll-sentinel" style="height:1px;"></div>
+    <div id="orders-load-status" style="
+         text-align:center;padding:var(--space-4);
+         font-size:var(--text-sm);color:var(--color-text-muted);
+         display:none;">
+    </div>
   </div>
 </div>
 
@@ -149,7 +198,10 @@ pub async fn render_orders(
 <script src="/static/js/live.js"></script>
 <script src="/static/js/orders.js"></script>
 <script src="/static/js/f05_alerts.js"></script>
-<script>initOrdersPage('{branch_id}');</script>
+<script>
+  // T09: pass the initial next_cursor from SSR so JS can continue from page 2.
+  initOrdersPage('{branch_id}', {initial_cursor});
+</script>
 {shell_close}
 "#,
         shell_open("Orders — Biz-Brain"),
@@ -157,6 +209,7 @@ pub async fn render_orders(
         orders_rows_html = orders_rows_html,
         nudge_html = nudge_html,
         branch_id = branch_id,
+        initial_cursor = initial_cursor_json,
         shell_close = shell_close(),
     );
 

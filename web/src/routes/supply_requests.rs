@@ -1,4 +1,5 @@
 //! D05: SupplyRequests view — SSR initial render (D03 pattern).
+//! T09: SSR calls paginated store fn page 1; passes initial cursor to JS.
 //! T12/T13: topbar now passes branch name + list for switcher.
 
 use axum::{
@@ -9,6 +10,7 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 use api::AppState;
+use store::{PaginatedProjections, SrFilter, PAGE_SIZE};
 
 use crate::auth::{auth_error_response, authorize_branch, BranchAuthOutcome};
 use crate::templates::{load_topbar_data, shell_close, shell_open, topbar_html, page_not_found};
@@ -30,10 +32,19 @@ pub async fn render_supply_requests(
 
     let (branch_name, all_branches) = load_topbar_data(&state.pool, branch_id, &claims).await;
 
-    let supply_requests = match state.projections.supply_requests_by_branch(branch_id).await {
-        Ok(rows) => rows,
+    // T09: page 1 only — no cursor, no filter.
+    let paginator = PaginatedProjections::new(state.pool.clone());
+    let (supply_requests, first_next_cursor) = match paginator
+        .supply_requests_page(branch_id, None, &SrFilter::default(), PAGE_SIZE)
+        .await
+    {
+        Ok(result) => result,
         Err(_) => return page_not_found(),
     };
+
+    let initial_cursor_json = first_next_cursor
+        .map(|c| format!(r#""{}""#, c.encode()))
+        .unwrap_or_else(|| "null".to_string());
 
     let rows_html = if supply_requests.is_empty() {
         r#"<tr><td colspan="4" class="data-table__empty">No supply requests yet.</td></tr>"#.to_string()
@@ -60,6 +71,21 @@ pub async fn render_supply_requests(
     </div>
   </div>
 
+  <!-- T09: state filter for supply requests -->
+  <div style="display:flex;gap:var(--space-3);align-items:flex-end;margin-bottom:var(--space-4);">
+    <div class="form-group" style="margin-bottom:0;min-width:180px;">
+      <label class="form-label" for="sr-filter-state">State</label>
+      <select class="form-select" id="sr-filter-state">
+        <option value="">All states</option>
+        <option value="DRAFT">Draft</option>
+        <option value="SENT">Sent</option>
+        <option value="INVOICE_RECEIVED">Invoice Received</option>
+        <option value="OWNER_APPROVED_INVOICE">Owner Approved Invoice</option>
+        <option value="SUPPLIER_CONFIRMED">Supplier Confirmed</option>
+      </select>
+    </div>
+  </div>
+
   <div class="card">
     <table class="data-table" id="sr-table">
       <thead>
@@ -74,6 +100,11 @@ pub async fn render_supply_requests(
         {rows_html}
       </tbody>
     </table>
+    <div id="sr-scroll-sentinel" style="height:1px;"></div>
+    <div id="sr-load-status" style="
+         text-align:center;padding:var(--space-4);
+         font-size:var(--text-sm);color:var(--color-text-muted);
+         display:none;"></div>
   </div>
 </div>
 
@@ -129,19 +160,20 @@ pub async fn render_supply_requests(
 <script src="/static/js/ui.js"></script>
 <script src="/static/js/live.js"></script>
 <script src="/static/js/supply_requests.js"></script>
-<script>initSupplyRequestsPage('{branch_id}');</script>
+<script>initSupplyRequestsPage('{branch_id}', {initial_cursor});</script>
 {shell_close}"#,
         shell_open("Supply Requests — Biz-Brain"),
         topbar = topbar_html(branch_id, &branch_name, &all_branches, "supply-requests"),
         rows_html = rows_html,
         branch_id = branch_id,
+        initial_cursor = initial_cursor_json,
         shell_close = shell_close(),
     );
 
     Html(html).into_response()
 }
 
-fn supply_request_row_html(sr: &store::projection_tables::SupplyRequestCurrentState) -> String {
+fn supply_request_row_html(sr: &store::projection_tables_paginated::SrPageRow) -> String {
     let state_lower = sr.state.to_lowercase();
     format!(
         r#"<tr data-sr-id="{id}">

@@ -1,6 +1,9 @@
 //! Supply request list, create, and send endpoints.
+//! T09: list_supply_requests returns { items, next_cursor } with cursor pagination.
+//!      Supports ?after=<cursor>&limit=50&state=DRAFT,SENT (state filter only per T09).
+
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -8,7 +11,20 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use domain::{BranchId, DomainEvent, SupplyRequestId};
+use store::{PaginatedProjections, SrCursor, SrFilter, PAGE_SIZE};
 use crate::{extractors::AuthorizedBranch, state::AppState};
+
+// ── List query params ─────────────────────────────────────────────────────── //
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ListSrQuery {
+    pub after: Option<String>,
+    pub limit: Option<i64>,
+    /// Comma-separated state filter e.g. `DRAFT,SENT`
+    pub state: Option<String>,
+}
+
+// ── Response types ────────────────────────────────────────────────────────── //
 
 #[derive(Debug, Serialize)]
 pub struct SupplyRequestView {
@@ -18,26 +34,66 @@ pub struct SupplyRequestView {
     pub order_ids: Vec<Uuid>,
 }
 
+/// T09: paginated response envelope.
+#[derive(Debug, Serialize)]
+pub struct SupplyRequestsPage {
+    pub items: Vec<SupplyRequestView>,
+    pub next_cursor: Option<String>,
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────── //
+
 pub async fn list_supply_requests(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Query(params): Query<ListSrQuery>,
     State(state): State<AppState>,
-) -> Result<Json<Vec<SupplyRequestView>>, (StatusCode, String)> {
-    let rows: Vec<(Uuid, String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT s.id, s.description, p.state, COALESCE(s.order_ids::jsonb, '[]'::jsonb) \
-         FROM supply_request_current_state p \
-         JOIN supply_requests s ON s.id = p.supply_request_id \
-         WHERE p.branch_id = $1 ORDER BY p.updated_at DESC",
-    )
-    .bind(branch_id)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal)?;
+) -> Result<Json<SupplyRequestsPage>, (StatusCode, String)> {
+    let after_cursor: Option<SrCursor> = params
+        .after
+        .as_deref()
+        .and_then(SrCursor::decode);
 
-    Ok(Json(rows.into_iter().map(|(id, description, state_str, order_ids_json)| {
-        let order_ids: Vec<Uuid> = serde_json::from_value(order_ids_json).unwrap_or_default();
-        SupplyRequestView { id, description, state: state_str, order_ids }
-    }).collect()))
+    let filter = SrFilter {
+        states: params
+            .state
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_uppercase)
+            .collect(),
+    };
+
+    let limit = params.limit.unwrap_or(PAGE_SIZE);
+
+    let paginator = PaginatedProjections::new(state.pool.clone());
+    let (rows, next_cursor) = paginator
+        .supply_requests_page(branch_id, after_cursor.as_ref(), &filter, limit)
+        .await
+        .map_err(internal)?;
+
+    let items = rows
+        .into_iter()
+        .map(|r| {
+            let order_ids: Vec<Uuid> =
+                serde_json::from_value(r.order_ids).unwrap_or_default();
+            SupplyRequestView {
+                id: r.id,
+                description: r.description,
+                state: r.state,
+                order_ids,
+            }
+        })
+        .collect();
+
+    Ok(Json(SupplyRequestsPage {
+        items,
+        next_cursor: next_cursor.map(|c| c.encode()),
+    }))
 }
+
+// ── Create ────────────────────────────────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSupplyRequestRequest {
@@ -78,9 +134,8 @@ pub async fn create_supply_request(
     Ok((StatusCode::CREATED, Json(CreateSupplyRequestResponse { id })))
 }
 
-/// POST /branches/:branch_id/supply-requests/:supply_request_id/send
-/// Uses typed Path<(Uuid, Uuid)> — same fix as commands.rs to avoid the
-/// double-Path extraction that breaks the Handler trait bound.
+// ── Send ──────────────────────────────────────────────────────────────────── //
+
 pub async fn send_supply_request(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, supply_request_id)): Path<(Uuid, Uuid)>,

@@ -1,5 +1,12 @@
 /**
- * D04 / P04 / P16 / F04 / F01: Orders page — full Owner control.
+ * D04 / P04 / P16 / F04 / F01 / T09: Orders page — full Owner control.
+ *
+ * T09 additions:
+ *  - initOrdersPage now accepts initialCursor (passed from SSR)
+ *  - Filter bar: state dropdown, worker dropdown, search input with debounce
+ *  - Infinite scroll via IntersectionObserver on #orders-scroll-sentinel
+ *  - SSE-triggered refresh reloads page 1 (cursor reset), shows toast if scrolled deep
+ *  - Filter changes reset cursor and refetch from page 1
  *
  * F01 changes:
  *  - "Job name" input in Create Order modal (optional, ≤20 chars, with counter)
@@ -8,24 +15,129 @@
  *  - 409 Conflict on duplicate short_name gives a readable error
  */
 
-function initOrdersPage(branchId) {
+function initOrdersPage(branchId, initialCursor) {
   const api = (path, opts) => BB.apiFetch(`/api/v1/branches/${branchId}${path}`, opts);
 
   let pendingAssignOrderId   = null;
   let pendingReassignOrderId = null;
   let customerMap = {};
 
+  // ── T09: Pagination state ─────────────────────────────────────────── //
+
+  let nextCursor = initialCursor ?? null; // null = no more pages
+  let isLoading  = false;
+  let allLoaded  = (initialCursor === null || initialCursor === undefined);
+
+  // Current filter state (mirrors filter bar inputs).
+  function currentFilter() {
+    return {
+      state:     document.getElementById('filter-state')?.value  || '',
+      worker_id: document.getElementById('filter-worker')?.value || '',
+      q:         document.getElementById('filter-q')?.value.trim() || '',
+    };
+  }
+
+  function filterToParams(filter, cursor) {
+    const params = new URLSearchParams();
+    if (filter.state)     params.set('state',     filter.state);
+    if (filter.worker_id) params.set('worker_id', filter.worker_id);
+    if (filter.q)         params.set('q',         filter.q);
+    if (cursor)           params.set('after',     cursor);
+    params.set('limit', '50');
+    return params.toString();
+  }
+
+  // ── IntersectionObserver for infinite scroll ──────────────────────── //
+
+  const sentinel  = document.getElementById('orders-scroll-sentinel');
+  const statusEl  = document.getElementById('orders-load-status');
+
+  function setStatus(msg) {
+    if (!statusEl) return;
+    statusEl.textContent = msg;
+    statusEl.style.display = msg ? '' : 'none';
+  }
+
+  const scrollObserver = new IntersectionObserver(
+    async (entries) => {
+      if (!entries[0].isIntersecting) return;
+      if (isLoading || allLoaded) return;
+      await loadNextPage();
+    },
+    { rootMargin: '200px' }
+  );
+
+  if (sentinel) scrollObserver.observe(sentinel);
+
+  async function loadNextPage() {
+    if (isLoading || allLoaded || !nextCursor) return;
+    isLoading = true;
+    setStatus('Loading…');
+
+    try {
+      const qs = filterToParams(currentFilter(), nextCursor);
+      const data = await api(`/orders?${qs}`);
+      appendRows(data.items);
+      nextCursor = data.next_cursor ?? null;
+      allLoaded  = !nextCursor;
+      setStatus(allLoaded ? 'All orders loaded.' : '');
+    } catch (e) {
+      setStatus('');
+      BB.showToast(`Load failed: ${e.message}`, 'error');
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  function appendRows(orders) {
+    const tbody = document.getElementById('orders-tbody');
+    if (!tbody) return;
+    const emptyRow = tbody.querySelector('td[colspan]');
+    if (emptyRow) emptyRow.closest('tr')?.remove();
+    for (const o of orders) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = orderRowHtml(o);
+      tbody.appendChild(tr);
+    }
+    attachRowActions();
+  }
+
+  // ── Filter bar ────────────────────────────────────────────────────── //
+
+  let filterDebounce = null;
+
+  function onFilterChange() {
+    clearTimeout(filterDebounce);
+    filterDebounce = setTimeout(resetAndRefetch, 300);
+  }
+
+  async function resetAndRefetch() {
+    nextCursor = null;
+    allLoaded  = false;
+    await refreshOrderList();
+  }
+
+  document.getElementById('filter-state')?.addEventListener('change', onFilterChange);
+  document.getElementById('filter-worker')?.addEventListener('change', onFilterChange);
+  document.getElementById('filter-q')?.addEventListener('input', onFilterChange);
+
+  document.getElementById('filter-clear-btn')?.addEventListener('click', () => {
+    const s = document.getElementById('filter-state');
+    const w = document.getElementById('filter-worker');
+    const q = document.getElementById('filter-q');
+    if (s) s.value = '';
+    if (w) w.value = '';
+    if (q) q.value = '';
+    resetAndRefetch();
+  });
+
   // ── On load ──────────────────────────────────────────────────────── //
 
   attachRowActions();
-  // F05: expose branchId on alert buttons so refreshAlertBtn can build the URL.
-  // (done inside attachRowActions already)
-
   loadCustomers();
-  loadWorkers();
+  loadWorkersForFilter();
 
-  // F01: character counter for short-name input in create modal.
-  const shortNameInput = document.getElementById('order-short-name');
+  const shortNameInput   = document.getElementById('order-short-name');
   const shortNameCounter = document.getElementById('short-name-counter');
   if (shortNameInput && shortNameCounter) {
     shortNameInput.addEventListener('input', () => {
@@ -39,37 +151,62 @@ function initOrdersPage(branchId) {
 
   new BranchEventSource(branchId)
     .withBadge(document.getElementById('live-badge'))
-    .on('OrderChanged', () => refreshOrderList())
+    .on('OrderChanged', () => {
+      // SSE reload: reset to page 1. If user is scrolled deep, show a toast
+      // rather than jarring them; they can scroll up to see new activity.
+      const scrolled = window.scrollY > 600;
+      refreshOrderList().then(() => {
+        if (scrolled) {
+          BB.showToast('List updated — scroll up to see recent activity.', 'info');
+        }
+      });
+    })
     .connect();
 
-  // ── Order list refresh ───────────────────────────────────────────── //
+  // ── Order list refresh (page 1) ──────────────────────────────────── //
 
   async function refreshOrderList() {
-    let orders;
-    try { orders = await api('/orders'); }
-    catch (e) { BB.showToast(`Refresh failed: ${e.message}`, 'error'); return; }
+    isLoading = true;
+    setStatus('');
 
-    const tbody = document.getElementById('orders-tbody');
-    if (orders.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" class="data-table__empty">No orders yet.</td></tr>';
+    const qs = filterToParams(currentFilter(), null);
+    let data;
+    try {
+      data = await api(`/orders?${qs}`);
+    } catch (e) {
+      BB.showToast(`Refresh failed: ${e.message}`, 'error');
+      isLoading = false;
       return;
     }
 
-    tbody.innerHTML = orders.map(orderRowHtml).join('');
+    const tbody = document.getElementById('orders-tbody');
+    if (!tbody) { isLoading = false; return; }
+
+    if (data.items.length === 0) {
+      tbody.innerHTML =
+        '<tr><td colspan="5" class="data-table__empty">No orders yet.</td></tr>';
+    } else {
+      tbody.innerHTML = data.items.map(orderRowHtml).join('');
+    }
+
     attachRowActions();
+    nextCursor = data.next_cursor ?? null;
+    allLoaded  = !nextCursor;
+    setStatus(allLoaded && data.items.length > 0 ? 'All orders loaded.' : '');
+    isLoading = false;
   }
+
+  // ── Row HTML builder ─────────────────────────────────────────────── //
 
   function orderRowHtml(o) {
     const pill     = BB.statePill(o.state);
     const customer = BB.escapeHtml(customerMap[o.customer_id] || BB.shortId(o.customer_id));
     const worker   = o.worker_name ? BB.escapeHtml(o.worker_name) : '—';
 
-    // F01: short_name tag.
     const namePrefix = o.short_name
       ? `<span class="order-tag" title="Job name">${BB.escapeHtml(o.short_name)}</span> `
       : '';
 
-    // F04: thread button.
     let threadBtn = '';
     if (o.worker_id) {
       const unread = o.unread_message_count || 0;
@@ -81,24 +218,36 @@ function initOrdersPage(branchId) {
           title="View conversation thread">💬${badge}</button>`;
     }
 
-    // F04: AI low-confidence badge.
     const aiBadge = o.ai_routed_low_confidence
       ? `<span class="ai-badge" title="AI-routed with low confidence — review recommended">🤖?</span>`
       : '';
+
     const datePart = window.renderDateChips
       ? window.renderDateChips(o.start_date, o.due_date)
       : '';
 
+    const alertBell = o.alert_count > 0
+      ? `<button class="alert-btn" data-order-id="${o.id}" data-branch-id="${branchId}"
+               data-active="true" onclick="openAlertsModal('${o.id}',${JSON.stringify(o.description)},api)"
+               title="Follow-up alerts">
+           🔔 <span class="alert-count-badge">${o.alert_count}</span>
+         </button>`
+      : '';
+
     return `
-      <tr data-order-id="${o.id}" data-state="${o.state}" data-short-name="${BB.escapeHtml(o.short_name || '')}" data-start-date="${o.start_date ?? ''}" data-due-date="${o.due_date ?? ''}">
+      <tr data-order-id="${o.id}" data-state="${o.state}"
+          data-short-name="${BB.escapeHtml(o.short_name || '')}"
+          data-start-date="${o.start_date ?? ''}"
+          data-due-date="${o.due_date ?? ''}">
         <td>${pill}</td>
-        <td>${namePrefix}<span class="order-desc" id="desc-${o.id}">${BB.escapeHtml(o.description)}</span></td>
+        <td>${namePrefix}<span class="order-desc" id="desc-${o.id}">${BB.escapeHtml(o.description)}</span>
+          ${datePart ? `<div style="display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:3px;">${datePart}</div>` : ''}
+        </td>
         <td class="text-muted text-sm">${customer}</td>
         <td class="text-muted text-xs" id="worker-${o.id}">${worker}</td>
-        <td ${datePart ? `<div style="display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:3px;">${datePart}</div>` : ''}</td>
         <td>
           <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
-            ${threadBtn}${aiBadge}
+            ${threadBtn}${aiBadge}${alertBell}
             <div class="order-gear-wrap" data-order-id="${o.id}"
                  style="position:relative;display:inline-block;"></div>
           </div>
@@ -108,7 +257,6 @@ function initOrdersPage(branchId) {
 
   function attachRowActions() {
     document.querySelectorAll('.order-gear-wrap').forEach(renderGearButton);
-    // F04: wire thread buttons.
     document.querySelectorAll('.thread-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const orderId = btn.dataset.orderId;
@@ -195,7 +343,10 @@ function initOrdersPage(branchId) {
     });
 
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') { backdrop.remove(); document.removeEventListener('keydown', onKeyDown); }
+      if (e.key === 'Escape') {
+        backdrop.remove();
+        document.removeEventListener('keydown', onKeyDown);
+      }
     };
     document.addEventListener('keydown', onKeyDown);
   }
@@ -204,7 +355,9 @@ function initOrdersPage(branchId) {
     const isWorker = msg.role === 'user';
     const cls      = isWorker ? 'worker' : 'owner';
     const label    = isWorker ? 'Worker' : 'Bot / Owner';
-    const time     = new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const time     = new Date(msg.created_at).toLocaleTimeString([], {
+      hour: '2-digit', minute: '2-digit',
+    });
     return `
       <div class="thread-bubble thread-bubble--${cls}">
         <div class="thread-bubble__body">${BB.escapeHtml(msg.content)}</div>
@@ -231,11 +384,10 @@ function initOrdersPage(branchId) {
   }
 
   function openGearMenu(wrap) {
-    const orderId  = wrap.dataset.orderId;
-    const row      = document.querySelector(`tr[data-order-id="${orderId}"]`);
-    const stateEl  = row?.querySelector('.state-pill');
-    const state    = stateEl?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
-    // F01: read current short_name from data attribute set during render.
+    const orderId         = wrap.dataset.orderId;
+    const row             = document.querySelector(`tr[data-order-id="${orderId}"]`);
+    const stateEl         = row?.querySelector('.state-pill');
+    const state           = stateEl?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
     const currentShortName = row?.dataset.shortName ?? '';
 
     const done       = state === 'DONE';
@@ -286,24 +438,22 @@ function initOrdersPage(branchId) {
       addItem(menu, '✏️ Edit description',  'normal', () => editDescription(orderId));
     }
 
-    // F01: Set / edit / clear job name — available at any non-deleted state.
     const shortNameLabel = currentShortName
       ? `🏷 Edit job name (${currentShortName})`
       : '🏷 Set job name';
     addItem(menu, shortNameLabel, 'normal', () => editShortName(orderId, currentShortName));
-    // F05: dates
+
     addItem(menu, '📅 Set dates', 'normal', () => {
-      const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
       const startIso = row?.dataset.startDate ?? null;
       const dueIso   = row?.dataset.dueDate   ?? null;
       openDatesModal(orderId, startIso, dueIso, api);
     });
 
-    // F05: alerts
     addItem(menu, '🔔 Follow-up alerts', 'normal', () => {
       const desc = row?.querySelector('.order-desc')?.textContent ?? orderId;
       openAlertsModal(orderId, desc, api);
     });
+
     if (!terminal) {
       addSectionLabel(menu, 'Force state (bypass messaging)');
       addItem(menu, '→ Force Accepted',       'warn', () => forceState(orderId, 'force-accepted'));
@@ -364,10 +514,9 @@ function initOrdersPage(branchId) {
   });
 
   document.getElementById('create-order-btn').addEventListener('click', async () => {
-    const descEl     = document.getElementById('order-description');
-    const customerEl = document.getElementById('order-customer');
-    const newNameEl  = document.getElementById('new-customer-name');
-    // F01: read short_name.
+    const descEl      = document.getElementById('order-description');
+    const customerEl  = document.getElementById('order-customer');
+    const newNameEl   = document.getElementById('new-customer-name');
     const shortNameEl = document.getElementById('order-short-name');
 
     const description = descEl.value.trim();
@@ -402,9 +551,12 @@ function initOrdersPage(branchId) {
       BB.closeModal('create-order-modal');
       descEl.value = '';
       newNameEl.value = '';
-      if (shortNameEl) { shortNameEl.value = ''; shortNameCounter.textContent = '0/20'; }
+      if (shortNameEl) {
+        shortNameEl.value = '';
+        if (shortNameCounter) shortNameCounter.textContent = '0/20';
+      }
       document.getElementById('new-customer-row').style.display = 'none';
-      await refreshOrderList();
+      await resetAndRefetch();
     } catch (e) {
       BB.showToast(`Create order failed: ${e.message}`, 'error');
     }
@@ -432,8 +584,7 @@ function initOrdersPage(branchId) {
             <span class="text-xs text-muted" id="sn-counter">${currentValue.length}/20</span>
           </div>
           <p class="text-xs text-muted">
-            Leave blank to clear the job name.
-            Names must be unique within this branch.
+            Leave blank to clear. Names must be unique within this branch.
           </p>
         </div>
         <div class="modal__footer">
@@ -443,7 +594,6 @@ function initOrdersPage(branchId) {
       </div>`;
 
     document.body.appendChild(backdrop);
-
     const input   = backdrop.querySelector('#sn-input');
     const counter = backdrop.querySelector('#sn-counter');
     input.focus();
@@ -458,8 +608,6 @@ function initOrdersPage(branchId) {
       if (action === 'cancel') { backdrop.remove(); return; }
 
       const newValue = input.value.trim();
-
-      // Nothing changed — close silently.
       if (newValue === currentValue) { backdrop.remove(); return; }
 
       try {
@@ -469,12 +617,9 @@ function initOrdersPage(branchId) {
         });
         backdrop.remove();
 
-        // Update the row's data attribute so the gear menu reflects the new value
-        // until the next SSE refresh rebuilds the row.
         const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
         if (row) {
           row.dataset.shortName = newValue;
-          // Update or remove the tag in the description cell.
           const descCell = row.querySelector('td:nth-child(2)');
           if (descCell) {
             const existingTag = descCell.querySelector('.order-tag');
@@ -491,7 +636,6 @@ function initOrdersPage(branchId) {
               }
             } else {
               existingTag?.remove();
-              // Remove any leading text node that was the space after the tag.
               if (descCell.firstChild?.nodeType === Node.TEXT_NODE) {
                 descCell.firstChild.remove();
               }
@@ -641,7 +785,7 @@ function initOrdersPage(branchId) {
     });
   }
 
-  // ── Cancel / Reset / Close ───────────────────────────────────────── //
+  // ── Cancel / Reset / Close / Delete ─────────────────────────────── //
 
   async function cancelOrder(orderId) {
     const ok = await BB.confirm('Cancel this order? The Worker will be notified.');
@@ -675,8 +819,6 @@ function initOrdersPage(branchId) {
       BB.showToast(`Close failed: ${e.message}`, 'error');
     }
   }
-
-  // ── Delete ───────────────────────────────────────────────────────── //
 
   async function deleteOrder(orderId) {
     const ok = await BB.confirm('Permanently delete this order? This cannot be undone.');
@@ -712,12 +854,26 @@ function initOrdersPage(branchId) {
     } catch { /* non-fatal */ }
   }
 
-  async function loadWorkers() {
+  async function loadWorkersForFilter() {
     try {
       const workers = await api('/workers');
-      const sel = document.getElementById('assign-worker-select');
-      sel.innerHTML = '<option value="">Select worker…</option>' +
-        workers.map(w => `<option value="${w.id}">${BB.escapeHtml(w.name)}</option>`).join('');
+
+      // Populate assign/reassign modal select.
+      const assignSel = document.getElementById('assign-worker-select');
+      if (assignSel) {
+        assignSel.innerHTML = '<option value="">Select worker…</option>' +
+          workers.map(w => `<option value="${w.id}">${BB.escapeHtml(w.name)}</option>`).join('');
+      }
+
+      // T09: populate filter bar worker dropdown.
+      const filterSel = document.getElementById('filter-worker');
+      if (filterSel) {
+        filterSel.innerHTML = '<option value="">All workers</option>' +
+          workers
+            .filter(w => w.bound)
+            .map(w => `<option value="${w.id}">${BB.escapeHtml(w.name)}</option>`)
+            .join('');
+      }
     } catch { /* non-fatal */ }
   }
 }

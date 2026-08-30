@@ -3,9 +3,11 @@
 //! P16: list_orders filters soft-deleted orders via JOIN.
 //! F04: unread_message_count, ai_routed_low_confidence exposed; thread endpoint added.
 //! F01: short_name in CreateOrderRequest, OrderView, create_order, list_orders.
+//! T09: list_orders is now paginated — returns { items, next_cursor }.
+//!      Supports ?after=<cursor>&limit=50&state=ASSIGNED,ACCEPTED&worker_id=<uuid>&q=text
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -13,8 +15,27 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use domain::OrderId;
+use store::{OrderCursor, OrderFilter, PaginatedProjections, PAGE_SIZE};
 
 use crate::{extractors::AuthorizedBranch, state::AppState};
+
+// ── List query params ─────────────────────────────────────────────────────── //
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ListOrdersQuery {
+    /// Opaque cursor string from previous response's `next_cursor`.
+    pub after: Option<String>,
+    /// Max rows to return (server clamps to PAGE_SIZE = 50).
+    pub limit: Option<i64>,
+    /// Comma-separated state filter: e.g. `ASSIGNED,ACCEPTED`
+    pub state: Option<String>,
+    /// Worker UUID filter
+    pub worker_id: Option<Uuid>,
+    /// Free-text search against description and short_name
+    pub q: Option<String>,
+}
+
+// ── Response types ────────────────────────────────────────────────────────── //
 
 #[derive(Debug, Serialize)]
 pub struct OrderView {
@@ -35,36 +56,80 @@ pub struct OrderView {
     pub last_worker_message_at: Option<chrono::DateTime<chrono::Utc>>,
     pub start_date: Option<chrono::DateTime<chrono::Utc>>,
     pub due_date:   Option<chrono::DateTime<chrono::Utc>>,
-    pub alert_count: i64,   // active alert count for the bell badge
+    pub alert_count: i64,
 }
+
+/// T09: paginated response envelope.
+#[derive(Debug, Serialize)]
+pub struct OrdersPage {
+    pub items: Vec<OrderView>,
+    /// Base64-encoded cursor for the next page. `null` when on the last page.
+    pub next_cursor: Option<String>,
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────── //
 
 pub async fn list_orders(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
+    Query(params): Query<ListOrdersQuery>,
     State(state): State<AppState>,
-) -> Result<Json<Vec<OrderView>>, (StatusCode, String)> {
-    let rows = state.projections.orders_by_branch(branch_id).await.map_err(internal)?;
+) -> Result<Json<OrdersPage>, (StatusCode, String)> {
+    // Decode opaque cursor (if provided).
+    let after_cursor: Option<OrderCursor> = params
+        .after
+        .as_deref()
+        .and_then(OrderCursor::decode);
 
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| OrderView {
-                id: r.id,
-                customer_id: r.customer_id,
-                description: r.description,
-                state: r.state,
-                worker_id: r.worker_id,
-                worker_name: r.worker_name,
-                short_name: r.short_name,
-                unread_message_count: r.unread_message_count,
-                ai_routed_low_confidence: r.ai_routed_low_confidence,
-                last_worker_message: r.last_worker_message,
-                last_worker_message_at: r.last_worker_message_at,
-                start_date: r.start_date,
-                due_date: r.due_date,
-                alert_count: r.alert_count,
-            })
+    // Build filter.
+    let filter = OrderFilter {
+        states: params
+            .state
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_uppercase)
             .collect(),
-    ))
+        worker_id: params.worker_id,
+        q: params.q.filter(|s| !s.trim().is_empty()),
+    };
+
+    let limit = params.limit.unwrap_or(PAGE_SIZE);
+
+    let paginator = PaginatedProjections::new(state.pool.clone());
+    let (rows, next_cursor) = paginator
+        .orders_page(branch_id, after_cursor.as_ref(), &filter, limit)
+        .await
+        .map_err(internal)?;
+
+    let items = rows
+        .into_iter()
+        .map(|r| OrderView {
+            id: r.id,
+            customer_id: r.customer_id,
+            description: r.description,
+            state: r.state,
+            worker_id: r.worker_id,
+            worker_name: r.worker_name,
+            short_name: r.short_name,
+            unread_message_count: r.unread_message_count,
+            ai_routed_low_confidence: r.ai_routed_low_confidence,
+            last_worker_message: r.last_worker_message,
+            last_worker_message_at: r.last_worker_message_at,
+            start_date: r.start_date,
+            due_date: r.due_date,
+            alert_count: r.alert_count,
+        })
+        .collect();
+
+    Ok(Json(OrdersPage {
+        items,
+        next_cursor: next_cursor.map(|c| c.encode()),
+    }))
 }
+
+// ── Create Order ──────────────────────────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]
 pub struct CreateOrderRequest {
@@ -143,18 +208,11 @@ pub struct ThreadMessage {
 }
 
 /// GET /api/v1/branches/:branch_id/orders/:order_id/thread
-///
-/// Returns the conversation_history window for the Worker assigned to this
-/// order, restricted to messages on or after the order's first event minus
-/// one hour (prevents bleed from earlier orders on the same sender key).
-///
-/// Opening the thread also resets the unread count.
 pub async fn get_order_thread(
     AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
     Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ThreadMessage>>, (StatusCode, String)> {
-    // Verify order belongs to this branch.
     let exists: Option<(i32,)> = sqlx::query_as(
         "SELECT 1 FROM orders WHERE id = $1 AND branch_id = $2 AND deleted_at IS NULL",
     )
@@ -168,7 +226,6 @@ pub async fn get_order_thread(
         return Err((StatusCode::NOT_FOUND, "order not found".to_string()));
     }
 
-    // Fetch conversation history scoped to this order's timeline.
     let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT ch.role, ch.content, ch.created_at
          FROM conversation_history ch
@@ -190,10 +247,8 @@ pub async fn get_order_thread(
     .await
     .map_err(internal)?;
 
-    // Clear unread count now that Owner has seen the thread.
     let _ = state.projections.clear_unread(OrderId::new(order_id)).await;
 
-    // Publish SSE so the badge on the dashboard clears in real-time.
     let meta: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
             .bind(order_id)
@@ -217,11 +272,8 @@ pub async fn get_order_thread(
     ))
 }
 
-// ── F01: shared validation ───────────────────────────────────────────────── //
+// ── F01: shared validation ────────────────────────────────────────────────── //
 
-/// Normalise and validate a short_name value.
-/// Returns `Ok(None)` when the input is None or blank.
-/// Returns `Err` when length > 20.
 pub fn validate_short_name(raw: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
     match raw.map(str::trim).filter(|s| !s.is_empty()) {
         None => Ok(None),
