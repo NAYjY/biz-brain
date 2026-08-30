@@ -252,10 +252,28 @@ async fn handle_worker_disambiguation_reply(
     disambig_store: &DisambiguationStore,
     worker_agent: &WorkerAgent,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if reply contains an order name — resolve directly without yes/no.
+    let candidates = pending.candidates();
+    for &candidate_id in &candidates {
+        let (short_name, desc) = order_display_fields(state, candidate_id).await?;
+        let name = display_name(short_name.as_deref(), &desc);
+        if reply_text.to_lowercase().contains(&name.to_lowercase())
+            || reply_text.to_lowercase().contains(&desc.to_lowercase())
+        {
+            disambig_store.delete(sender_key).await?;
+            return resolve_and_apply_worker_event(
+                state, sender, worker_id, sender_key,
+                pending, OrderId::new(candidate_id),
+                history_repo, worker_agent,
+            ).await;
+        }
+    }
+
+    // Not an order name — check yes/no.
     if !is_affirmative(reply_text) && !is_negative(reply_text) {
-        disambig_store.delete(sender_key).await?;
+        // Don't delete — keep the pending flow alive and ask again.
         send_to_sender(state, sender,
-            "I'm not sure — please reply Yes or No. Which order is this about?").await;
+            "Please reply Yes or No, or type the order name.").await;
         return Ok(());
     }
 
@@ -272,7 +290,7 @@ async fn handle_worker_disambiguation_reply(
         }
         // All candidates exhausted → ClarificationRequested on first.
         disambig_store.delete(sender_key).await?;
-        if let Some(oid) = pending.candidates().first().copied() {
+        if let Some(&oid) = candidates.first() {
             let event = DomainEvent::ClarificationRequested {
                 worker_id,
                 order_id: OrderId::new(oid),
@@ -284,21 +302,48 @@ async fn handle_worker_disambiguation_reply(
         return Ok(());
     }
 
-    // Affirmative — re-classify original text on the pinned order.
+    // Affirmative.
     let confirmed_id = match pending.current_candidate() {
         Some(id) => OrderId::new(id),
         None => { disambig_store.delete(sender_key).await?; return Ok(()); }
     };
     disambig_store.delete(sender_key).await?;
+    resolve_and_apply_worker_event(
+        state, sender, worker_id, sender_key,
+        pending, confirmed_id,
+        history_repo, worker_agent,
+    ).await
+}
 
+async fn resolve_and_apply_worker_event(
+    state: &AppState,
+    sender: &ChannelIdentity,
+    worker_id: WorkerId,
+    sender_key: &str,
+    pending: &store::disambiguation::DisambiguationRow,
+    confirmed_id: OrderId,
+    history_repo: &ConversationHistoryRepository,
+    worker_agent: &WorkerAgent,
+) -> Result<(), Box<dyn std::error::Error>> {
     let history_rows = history_repo.load(sender_key).await?;
-    let history: Vec<agent::HistoryMessage> = history_rows.into_iter().map(to_history_msg).collect();
+    let history: Vec<agent::HistoryMessage> =
+        history_rows.into_iter().map(to_history_msg).collect();
 
+    // Fetch real state instead of hardcoding "confirmed".
+    let real_state: Option<(String,)> = sqlx::query_as(
+        "SELECT state FROM order_current_state WHERE order_id = $1",
+    )
+    .bind(confirmed_id.into_inner())
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let state_str = real_state.map(|(s,)| s).unwrap_or_else(|| "worker_assigned".to_string());
     let (_, desc) = order_display_fields(state, confirmed_id.into_inner()).await?;
+
     let ctx = vec![ActiveOrderContext {
         order_id: confirmed_id.into_inner(),
         description: desc,
-        state: "confirmed".to_string(),
+        state: state_str,
     }];
 
     let variant = worker_agent
