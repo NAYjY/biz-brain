@@ -26,12 +26,27 @@ function showToast(message, kind = 'info') {
 
 /* ── Modal ──────────────────────────────────────────────────────────── */
 
+// Track how many modals are open so we only unlock scroll when all are closed.
+let _modalOpenCount = 0;
+
 function openModal(backdropId) {
-  document.getElementById(backdropId)?.classList.remove('hidden');
+  const el = document.getElementById(backdropId);
+  if (!el) return;
+  el.classList.remove('hidden');
+  _modalOpenCount++;
+  if (_modalOpenCount === 1) {
+    document.body.style.overflow = 'hidden';
+  }
 }
 
 function closeModal(backdropId) {
-  document.getElementById(backdropId)?.classList.add('hidden');
+  const el = document.getElementById(backdropId);
+  if (!el) return;
+  el.classList.add('hidden');
+  _modalOpenCount = Math.max(0, _modalOpenCount - 1);
+  if (_modalOpenCount === 0) {
+    document.body.style.overflow = '';
+  }
 }
 
 /* ── Confirm dialog ─────────────────────────────────────────────────── */
@@ -56,11 +71,24 @@ function confirm(message) {
     `;
 
     document.body.appendChild(backdrop);
+    // Lock scroll for dynamic modals too
+    _modalOpenCount++;
+    if (_modalOpenCount === 1) {
+      document.body.style.overflow = 'hidden';
+    }
+
+    function cleanup() {
+      backdrop.remove();
+      _modalOpenCount = Math.max(0, _modalOpenCount - 1);
+      if (_modalOpenCount === 0) {
+        document.body.style.overflow = '';
+      }
+    }
 
     backdrop.addEventListener('click', (e) => {
       const action = e.target.closest('[data-action]')?.dataset.action;
       if (!action) return;
-      backdrop.remove();
+      cleanup();
       resolve(action === 'confirm');
     });
   });
