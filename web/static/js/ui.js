@@ -32,6 +32,7 @@ let _modalOpenCount = 0;
 function openModal(backdropId) {
   const el = document.getElementById(backdropId);
   if (!el) return;
+  if (!el.classList.contains('hidden')) return; // already open, don't double-count
   el.classList.remove('hidden');
   _modalOpenCount++;
   if (_modalOpenCount === 1) {
@@ -42,6 +43,7 @@ function openModal(backdropId) {
 function closeModal(backdropId) {
   const el = document.getElementById(backdropId);
   if (!el) return;
+  if (el.classList.contains('hidden')) return; // already closed, don't double-count
   el.classList.add('hidden');
   _modalOpenCount = Math.max(0, _modalOpenCount - 1);
   if (_modalOpenCount === 0) {

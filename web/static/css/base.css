@@ -856,7 +856,7 @@ a:hover { text-decoration: underline; }
   }
 
    /* ── Modal backdrop: stretch to fill viewport ─────────────────── */
-  .modal-backdrop {
+  .modal-backdrop:not(.hidden) {
     display: flex !important; /* override the T16-01 display:none */
     padding: 0;
     align-items: stretch;
