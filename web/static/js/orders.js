@@ -529,6 +529,8 @@ function initOrdersPage(branchId, initialCursor) {
 
   // ── Gear button + menu ───────────────────────────────────────────── //
 
+    // ── Gear button + menu ───────────────────────────────────────────── //
+
   function renderGearButton(wrap) {
     wrap.innerHTML = '';
     const btn = document.createElement('button');
@@ -546,11 +548,13 @@ function initOrdersPage(branchId, initialCursor) {
   }
 
   function openGearMenu(wrap) {
-    const orderId         = wrap.dataset.orderId;
-    const row             = document.querySelector(`tr[data-order-id="${orderId}"]`);
-    const stateEl         = row?.querySelector('.state-pill');
-    const state           = stateEl?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
-    const currentShortName = row?.dataset.shortName ?? '';
+    const orderId          = wrap.dataset.orderId;
+
+    // Resolve state from table row OR mobile card (T16-02)
+    const container        = document.querySelector(`tr[data-order-id="${orderId}"], .order-card[data-order-id="${orderId}"]`);
+    const stateEl          = container?.querySelector('.state-pill');
+    const state            = stateEl?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
+    const currentShortName = container?.dataset.shortName ?? '';
 
     const done       = state === 'DONE';
     const cancelled  = state === 'CANCELLED';
@@ -563,6 +567,149 @@ function initOrdersPage(branchId, initialCursor) {
     const active     = assigned || accepted || clarif || ready;
     const terminal   = done;
 
+    // ── Build items array ────────────────────────────────────────── //
+    // Each entry is one of:
+    //   { type: 'item',    label, kind, onClick }
+    //   { type: 'divider' }
+    //   { type: 'label',   text }
+
+    const items = [];
+
+    if (unassigned || unavail || cancelled) {
+      items.push({ type: 'item', label: '👤 Assign worker',    kind: 'normal', onClick: () => openAssignWorker(orderId) });
+    }
+    if (active) {
+      items.push({ type: 'item', label: '🔄 Reassign worker',  kind: 'normal', onClick: () => openReassignWorker(orderId) });
+    }
+    if (active || ready) {
+      items.push({ type: 'item', label: '✅ Close (mark Done)', kind: 'normal', onClick: () => closeOrder(orderId) });
+    }
+    if (!done && !cancelled) {
+      items.push({ type: 'item', label: '❌ Cancel order',      kind: 'danger', onClick: () => cancelOrder(orderId) });
+    }
+    if (cancelled || unavail) {
+      items.push({ type: 'item', label: '↩ Reset to Unassigned', kind: 'normal', onClick: () => resetOrder(orderId) });
+    }
+    if (clarif) {
+      items.push({ type: 'item', label: '💬 Reply to worker…', kind: 'normal', onClick: () => {
+        const desc = container?.querySelector('.order-desc')?.textContent ?? orderId;
+        openThreadModal(orderId, desc);
+      }});
+    }
+
+    if (!terminal) items.push({ type: 'divider' });
+    if (!terminal) {
+      items.push({ type: 'item', label: '✏️ Edit description', kind: 'normal', onClick: () => editDescription(orderId) });
+    }
+
+    const shortNameLabel = currentShortName
+      ? `🏷 Edit job name (${currentShortName})`
+      : '🏷 Set job name';
+    items.push({ type: 'item', label: shortNameLabel, kind: 'normal', onClick: () => editShortName(orderId, currentShortName) });
+
+    items.push({ type: 'item', label: '📅 Set dates', kind: 'normal', onClick: () => {
+      const startIso = container?.dataset.startDate ?? null;
+      const dueIso   = container?.dataset.dueDate   ?? null;
+      openDatesModal(orderId, startIso, dueIso, api);
+    }});
+
+    items.push({ type: 'item', label: '🔔 Follow-up alerts', kind: 'normal', onClick: () => {
+      const desc = container?.querySelector('.order-desc')?.textContent ?? orderId;
+      openAlertsModal(orderId, desc, api);
+    }});
+
+    if (!terminal) {
+      items.push({ type: 'label', text: 'Force state (bypass messaging)' });
+      items.push({ type: 'item', label: '→ Force Accepted',      kind: 'warn', onClick: () => forceState(orderId, 'force-accepted') });
+      items.push({ type: 'item', label: '→ Force Unavailable',   kind: 'warn', onClick: () => forceState(orderId, 'force-unavailable') });
+      items.push({ type: 'item', label: '→ Force Clarification', kind: 'warn', onClick: () => forceState(orderId, 'force-clarification') });
+      items.push({ type: 'item', label: '→ Force Ready',         kind: 'warn', onClick: () => forceState(orderId, 'force-ready') });
+    }
+    if (done || cancelled || unassigned || unavail) {
+      items.push({ type: 'divider' });
+      items.push({ type: 'item', label: '🗑 Delete order', kind: 'danger', onClick: () => deleteOrder(orderId) });
+    }
+
+    // ── Render ───────────────────────────────────────────────────── //
+
+    if (window.innerWidth <= 768) {
+      openMobileActionSheet(items);
+    } else {
+      openDesktopDropdown(wrap, items);
+    }
+  }
+
+  // ── Mobile: full-screen action sheet ─────────────────────────────── //
+
+  function openMobileActionSheet(items) {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal" style="display:flex;flex-direction:column;">
+        <div class="modal__header">
+          <span class="modal__title">Order actions</span>
+          <button class="btn btn--ghost btn--sm" data-action="close">✕</button>
+        </div>
+        <div class="modal__body" style="padding:0;overflow-y:auto;">
+          <div id="action-sheet-list"></div>
+        </div>
+      </div>`;
+
+    const list = backdrop.querySelector('#action-sheet-list');
+
+    items.forEach((entry) => {
+      if (entry.type === 'divider') {
+        const hr = document.createElement('div');
+        hr.style.cssText = 'height:1px;background:var(--color-border);margin:var(--space-2) 0;';
+        list.appendChild(hr);
+        return;
+      }
+
+      if (entry.type === 'label') {
+        const lbl = document.createElement('div');
+        lbl.textContent = entry.text;
+        lbl.style.cssText = [
+          'padding:var(--space-2) var(--space-5) var(--space-1);',
+          'font-size:var(--text-xs);color:var(--color-text-muted);',
+          'font-weight:600;letter-spacing:.06em;text-transform:uppercase;',
+        ].join('');
+        list.appendChild(lbl);
+        return;
+      }
+
+      // type === 'item'
+      const btn = document.createElement('button');
+      btn.textContent = entry.label;
+      btn.style.cssText = [
+        'display:block;width:100%;',
+        'padding:var(--space-4) var(--space-5);',
+        'text-align:left;background:none;border:none;',
+        'border-bottom:1px solid var(--color-border);',
+        'font-size:var(--text-base);font-family:var(--font-body);cursor:pointer;',
+        'min-height:44px;',
+        entry.kind === 'danger' ? 'color:var(--color-state-err);'
+          : entry.kind === 'warn' ? 'color:var(--color-state-warn);'
+          : 'color:var(--color-text);',
+      ].join('');
+      btn.addEventListener('click', () => {
+        backdrop.remove();
+        entry.onClick();
+      });
+      list.appendChild(btn);
+    });
+
+    backdrop.addEventListener('click', (e) => {
+      if (e.target.closest('[data-action="close"]') || e.target === backdrop) {
+        backdrop.remove();
+      }
+    });
+
+    document.body.appendChild(backdrop);
+  }
+
+  // ── Desktop: absolute dropdown ────────────────────────────────────── //
+
+  function openDesktopDropdown(wrap, items) {
     const menu = document.createElement('div');
     menu.className = 'gear-menu';
     menu.style.cssText = [
@@ -573,96 +720,47 @@ function initOrdersPage(branchId, initialCursor) {
       'padding:.25rem 0;',
     ].join('');
 
-    if (unassigned || unavail || cancelled) {
-      addItem(menu, '👤 Assign worker',     'normal', () => openAssignWorker(orderId));
-    }
-    if (active) {
-      addItem(menu, '🔄 Reassign worker',   'normal', () => openReassignWorker(orderId));
-    }
-    if (active || ready) {
-      addItem(menu, '✅ Close (mark Done)',  'normal', () => closeOrder(orderId));
-    }
-    if (!done && !cancelled) {
-      addItem(menu, '❌ Cancel order',      'danger', () => cancelOrder(orderId));
-    }
-    if (cancelled || unavail) {
-      addItem(menu, '↩ Reset to Unassigned','normal', () => resetOrder(orderId));
-    }
-    if (clarif) {
-      addItem(menu, '💬 Reply to worker…',  'normal', () => {
-        const desc = row?.querySelector('.order-desc')?.textContent ?? orderId;
-        openThreadModal(orderId, desc);
+    items.forEach((entry) => {
+      if (entry.type === 'divider') {
+        const hr = document.createElement('div');
+        hr.style.cssText = 'border-top:1px solid var(--color-border);margin:.25rem 0;';
+        menu.appendChild(hr);
+        return;
+      }
+
+      if (entry.type === 'label') {
+        const lbl = document.createElement('div');
+        lbl.textContent = entry.text;
+        lbl.style.cssText = [
+          'padding:.3rem .9rem .15rem;font-size:var(--text-xs);',
+          'color:var(--color-text-muted);font-weight:600;',
+          'letter-spacing:.06em;text-transform:uppercase;',
+        ].join('');
+        menu.appendChild(lbl);
+        return;
+      }
+
+      const btn = document.createElement('button');
+      btn.textContent = entry.label;
+      btn.style.cssText = [
+        'display:block;width:100%;padding:.45rem .9rem;text-align:left;',
+        'background:none;border:none;cursor:pointer;font-size:var(--text-sm);',
+        'font-family:var(--font-body);transition:background .1s;',
+        entry.kind === 'danger' ? 'color:var(--color-state-err);'
+          : entry.kind === 'warn' ? 'color:var(--color-state-warn);'
+          : 'color:var(--color-text);',
+      ].join('');
+      btn.onmouseenter = () => btn.style.background = 'var(--color-surface-2)';
+      btn.onmouseleave = () => btn.style.background = 'none';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeAllMenus();
+        entry.onClick();
       });
-    }
-
-    if (!terminal) addDivider(menu);
-    if (!terminal) {
-      addItem(menu, '✏️ Edit description',  'normal', () => editDescription(orderId));
-    }
-
-    const shortNameLabel = currentShortName
-      ? `🏷 Edit job name (${currentShortName})`
-      : '🏷 Set job name';
-    addItem(menu, shortNameLabel, 'normal', () => editShortName(orderId, currentShortName));
-
-    addItem(menu, '📅 Set dates', 'normal', () => {
-      const startIso = row?.dataset.startDate ?? null;
-      const dueIso   = row?.dataset.dueDate   ?? null;
-      openDatesModal(orderId, startIso, dueIso, api);
+      menu.appendChild(btn);
     });
-
-    addItem(menu, '🔔 Follow-up alerts', 'normal', () => {
-      const desc = row?.querySelector('.order-desc')?.textContent ?? orderId;
-      openAlertsModal(orderId, desc, api);
-    });
-
-    if (!terminal) {
-      addSectionLabel(menu, 'Force state (bypass messaging)');
-      addItem(menu, '→ Force Accepted',       'warn', () => forceState(orderId, 'force-accepted'));
-      addItem(menu, '→ Force Unavailable',    'warn', () => forceState(orderId, 'force-unavailable'));
-      addItem(menu, '→ Force Clarification',  'warn', () => forceState(orderId, 'force-clarification'));
-      addItem(menu, '→ Force Ready',          'warn', () => forceState(orderId, 'force-ready'));
-    }
-    if (done || cancelled || unassigned || unavail) {
-      addDivider(menu);
-      addItem(menu, '🗑 Delete order',       'danger', () => deleteOrder(orderId));
-    }
 
     wrap.appendChild(menu);
-  }
-
-  function addItem(menu, label, kind, onClick) {
-    const btn = document.createElement('button');
-    btn.textContent = label;
-    btn.style.cssText = [
-      'display:block;width:100%;padding:.45rem .9rem;text-align:left;',
-      'background:none;border:none;cursor:pointer;font-size:var(--text-sm);',
-      'font-family:var(--font-body);transition:background .1s;',
-      kind === 'danger' ? 'color:var(--color-state-err);'
-        : kind === 'warn' ? 'color:var(--color-state-warn);'
-        : 'color:var(--color-text);',
-    ].join('');
-    btn.onmouseenter = () => btn.style.background = 'var(--color-surface-2)';
-    btn.onmouseleave = () => btn.style.background = 'none';
-    btn.addEventListener('click', (e) => { e.stopPropagation(); closeAllMenus(); onClick(); });
-    menu.appendChild(btn);
-  }
-
-  function addDivider(menu) {
-    const hr = document.createElement('div');
-    hr.style.cssText = 'border-top:1px solid var(--color-border);margin:.25rem 0;';
-    menu.appendChild(hr);
-  }
-
-  function addSectionLabel(menu, text) {
-    const lbl = document.createElement('div');
-    lbl.textContent = text;
-    lbl.style.cssText = [
-      'padding:.3rem .9rem .15rem;font-size:var(--text-xs);',
-      'color:var(--color-text-muted);font-weight:600;',
-      'letter-spacing:.06em;text-transform:uppercase;',
-    ].join('');
-    menu.appendChild(lbl);
   }
 
   function closeAllMenus() {
