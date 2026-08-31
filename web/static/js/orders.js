@@ -458,6 +458,17 @@ function initOrdersPage(branchId, initialCursor) {
       </div>`;
 
     document.body.appendChild(backdrop);
+    // T16-06: keep modal height in sync with visual viewport so the
+    // sticky footer stays above the iOS soft keyboard.
+    if (window.visualViewport) {
+      const onViewportResize = () => {
+        const modal = backdrop.querySelector('.modal');
+        if (modal) modal.style.height = `${window.visualViewport.height}px`;
+      };
+      window.visualViewport.addEventListener('resize', onViewportResize);
+      backdrop._cleanupViewport = () =>
+        window.visualViewport.removeEventListener('resize', onViewportResize);
+    }
     const body = backdrop.querySelector('#thread-msg-body');
     body.scrollTop = body.scrollHeight;
     backdrop.querySelector('#thread-reply-input')?.focus();
@@ -465,7 +476,11 @@ function initOrdersPage(branchId, initialCursor) {
     backdrop.addEventListener('click', async (e) => {
       const action = e.target.closest('[data-action]')?.dataset.action;
       if (!action) return;
-      if (action === 'close') { backdrop.remove(); return; }
+      if (action === 'close') { 
+        backdrop._cleanupViewport?.(); 
+        backdrop.remove(); 
+        return; 
+      }
       if (action === 'send') {
         const input = backdrop.querySelector('#thread-reply-input');
         const text  = input?.value.trim();
@@ -490,6 +505,7 @@ function initOrdersPage(branchId, initialCursor) {
 
     const onKeyDown = (e) => {
       if (e.key === 'Escape') {
+        backdrop._cleanupViewport?.();   // T16-06
         backdrop.remove();
         document.removeEventListener('keydown', onKeyDown);
       }

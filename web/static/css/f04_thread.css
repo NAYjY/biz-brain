@@ -106,3 +106,29 @@
 .thread-bubble--owner .thread-bubble__meta {
   text-align: right;
 }
+/* ── T16-06: Thread modal — mobile keyboard fix ────────────────────── */
+
+@media (max-width: 768px) {
+  .thread-body {
+    flex: 1;
+    max-height: none;                       /* remove the 50vh desktop cap */
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  #thread-reply-input {
+    min-height: 56px;
+    font-size: 16px;                        /* prevent iOS auto-zoom on focus */
+  }
+
+  .thread-send-row {
+    flex-direction: column;
+  }
+
+  .thread-send-row .btn--primary {
+    width: 100%;
+    min-height: 44px;
+    padding: var(--space-3);
+    justify-content: center;
+  }
+}
