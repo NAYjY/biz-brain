@@ -549,113 +549,8 @@ a:hover { text-decoration: underline; }
   flex: 1;
 }
 /* ── F04: Thread button ─────────────────────────────────────────────────── */
+/* ── f04_thread */
 
-.thread-btn {
-  position: relative;
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-1) var(--space-2);
-  cursor: pointer;
-  font-size: var(--text-sm);
-  font-family: var(--font-body);
-  color: var(--color-text-muted);
-  transition: background .15s, border-color .15s, color .15s;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  white-space: nowrap;
-}
-
-.thread-btn:hover {
-  background: var(--color-surface);
-  border-color: var(--color-accent-dim);
-  color: var(--color-text);
-}
-
-/* Highlight when there are unread messages */
-.thread-btn[data-unread]:not([data-unread="0"]) {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-}
-
-.thread-unread-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 4px;
-  border-radius: var(--radius-pill);
-  background: var(--color-accent);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-/* ── F04: AI low-confidence badge ──────────────────────────────────────── */
-
-.ai-badge {
-  font-size: var(--text-xs);
-  color: var(--color-state-warn);
-  cursor: help;
-  user-select: none;
-}
-
-/* ── F04: Thread modal bubbles ─────────────────────────────────────────── */
-
-.thread-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  overflow-y: auto;
-  max-height: 50vh;
-  padding: var(--space-2) 0;
-}
-
-.thread-bubble {
-  display: flex;
-  flex-direction: column;
-  max-width: 80%;
-}
-
-.thread-bubble--worker {
-  align-self: flex-start;
-}
-
-.thread-bubble--owner {
-  align-self: flex-end;
-}
-
-.thread-bubble__body {
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
-  font-size: var(--text-sm);
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.thread-bubble--worker .thread-bubble__body {
-  background: var(--color-surface-2);
-}
-
-.thread-bubble--owner .thread-bubble__body {
-  background: var(--color-accent-dim);
-}
-
-.thread-bubble__meta {
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-  margin-top: 3px;
-  padding: 0 2px;
-}
-
-.thread-bubble--owner .thread-bubble__meta {
-  text-align: right;
-}
 
 /* ── F01: Order short-name tag ─────────────────────────────────────────── */
 
@@ -695,12 +590,12 @@ a:hover { text-decoration: underline; }
 
 /* ── All mobile overrides in one clean block ─────────────────────── */
 @media (max-width: 768px) {
- 
+
   /* ── Utility classes ─────────────────────────────────────────── */
   .mobile-only  { display: block; }
   .desktop-only { display: none; }
- 
-  /* ── Page layout ──────────────────────────────────────────────── */
+
+  /* ── Page layout ─────────────────────────────────────────────── */
   .page {
     padding: var(--space-4);
     max-width: 100%;
@@ -710,45 +605,33 @@ a:hover { text-decoration: underline; }
     align-items: flex-start;
     gap: var(--space-3);
   }
- 
-  /* ── Data table hidden — card layout replaces it ──────────────── */
+
+  /* ── Data table hidden — card layout replaces it ─────────────── */
   .data-table {
     display: none;
   }
- 
-  /* ── Modals hidden — native system handles them on mobile ─────── */
-  .modal-backdrop {
-    display: none !important;
-  }
- 
-  /* ── Form inputs: 16px prevents iOS auto-zoom on focus ───────── */
+
+  /* ── Form inputs: 16px prevents iOS auto-zoom ────────────────── */
   .form-input,
   .form-select,
   .form-textarea {
     font-size: 16px;
   }
- 
-  /* ── Topbar: two-row layout ───────────────────────────────────── 
-     Row 1: [Biz·Brain wordmark] ........... [actions]
-     Row 2: [branch name/switcher] [nav →→→→→→→→→→→]
-  ──────────────────────────────────────────────────────────────── */
- 
+
+  /* ── Topbar: two-row layout ───────────────────────────────────── */
   .topbar {
     flex-wrap: wrap;
     align-items: center;
     padding: var(--space-3) var(--space-4);
-    /* Remove the large gap — children manage their own spacing */
     gap: 0;
   }
- 
-  /* Row 1 left: wordmark grows to fill space before actions */
+
   .topbar__wordmark {
     order: 1;
     flex: 1 1 auto;
     min-width: 0;
   }
- 
-  /* Row 1 right: locale switcher + account + sign out */
+
   .topbar__actions {
     order: 2;
     flex: 0 0 auto;
@@ -761,19 +644,12 @@ a:hover { text-decoration: underline; }
     padding: var(--space-1) var(--space-2);
     font-size: var(--text-xs);
   }
-  /* On very narrow screens, hide the "Account" link (sign out stays) */
-  @media (max-width: 380px) {
-    .topbar__actions a.btn--sm {
-      display: none;
-    }
-  }
- 
+
   .locale-switcher {
     font-size: var(--text-xs);
     padding: var(--space-1) var(--space-2);
   }
- 
-  /* Row 2 left: branch switcher (both select and plain-name variants) */
+
   .topbar .branch-switcher,
   .topbar > .branch-switcher__name {
     order: 3;
@@ -782,7 +658,6 @@ a:hover { text-decoration: underline; }
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    /* Push row 2 down with a top border acting as a visual divider */
     border-top: 1px solid var(--color-border);
     margin-top: var(--space-2);
     padding-top: var(--space-2);
@@ -799,8 +674,7 @@ a:hover { text-decoration: underline; }
     color: var(--color-text-muted);
     font-weight: 500;
   }
- 
-  /* Row 2 right: nav — scrollable, fades at right edge */
+
   .topbar > nav {
     order: 4;
     flex: 1 1 0;
@@ -812,18 +686,17 @@ a:hover { text-decoration: underline; }
     border-top: 1px solid var(--color-border);
     margin-top: var(--space-2);
     padding-top: var(--space-2);
-    /* Fade hint that nav scrolls */
     -webkit-mask-image: linear-gradient(to right, black 80%, transparent 100%);
     mask-image: linear-gradient(to right, black 80%, transparent 100%);
   }
   .topbar > nav::-webkit-scrollbar { display: none; }
- 
+
   .topbar__nav {
     display: flex;
     flex-wrap: nowrap;
     gap: 0;
     list-style: none;
-    width: max-content;   /* let it overflow and scroll */
+    width: max-content;
   }
   .topbar__nav a {
     white-space: nowrap;
@@ -834,7 +707,7 @@ a:hover { text-decoration: underline; }
     color: var(--color-text);
     background: var(--color-surface-2);
   }
- 
+
   /* ── Filter bar: stacked ──────────────────────────────────────── */
   .filter-bar {
     flex-direction: column;
@@ -847,22 +720,20 @@ a:hover { text-decoration: underline; }
     margin-bottom: 0;
   }
   .filter-bar .form-group select,
-  .filter-bar .form-group input {
-    width: 100%;
-  }
+  .filter-bar .form-group input { width: 100%; }
   .filter-bar .btn {
     width: 100%;
     justify-content: center;
   }
 
-   /* ── Modal backdrop: stretch to fill viewport ─────────────────── */
+  /* ── Modal backdrop: full-screen, respects .hidden ───────────── */
   .modal-backdrop:not(.hidden) {
-    display: flex !important; /* override the T16-01 display:none */
+    display: flex !important;
     padding: 0;
     align-items: stretch;
     justify-content: stretch;
   }
- 
+
   /* ── Modal panel: full-screen ────────────────────────────────── */
   .modal {
     width: 100%;
@@ -870,15 +741,12 @@ a:hover { text-decoration: underline; }
     max-height: 100%;
     border-radius: 0;
     border: none;
-    /* Reset the desktop overflow so the inner sections control scroll */
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    /* Reset gap — header/body/footer handle their own padding */
     gap: 0;
   }
- 
-  /* ── Sticky header with back affordance ──────────────────────── */
+
   .modal__header {
     position: sticky;
     top: 0;
@@ -886,27 +754,22 @@ a:hover { text-decoration: underline; }
     z-index: 1;
     border-bottom: 1px solid var(--color-border);
     padding: var(--space-4);
-    /* Ensure minimum tap target height */
     min-height: 56px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    /* Remove any desktop gap between header children */
     flex-shrink: 0;
   }
- 
-  /* ── Scrollable body ─────────────────────────────────────────── */
+
   .modal__body {
     flex: 1 1 auto;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     padding: var(--space-4);
-    /* Allow body to shrink so footer stays visible */
     min-height: 0;
   }
- 
-  /* ── Sticky footer ───────────────────────────────────────────── */
+
   .modal__footer {
     position: sticky;
     bottom: 0;
@@ -914,31 +777,23 @@ a:hover { text-decoration: underline; }
     border-top: 1px solid var(--color-border);
     padding: var(--space-4);
     flex-shrink: 0;
-    /* Stack buttons vertically on narrow screens */
     flex-direction: column-reverse;
     gap: var(--space-3);
   }
- 
+
   .modal__footer .btn {
     width: 100%;
     justify-content: center;
-    /* Ensure comfortable tap target */
     min-height: 44px;
   }
- 
-  /* ── Close/back button: ✕ becomes ← Back on mobile ──────────── */
-  /* Applied via .modal-close-btn class on the ✕ button in each modal.
-     The content override prepends the arrow; the original ✕ is hidden. */
+
   .modal__header .btn--ghost.btn--sm:last-child {
-    /* Make the tap target large enough regardless of label */
     min-width: 44px;
     min-height: 44px;
     justify-content: center;
   }
- 
-  /* ── Confirm dialog: also goes full-screen on mobile ─────────── */
-  /* The confirm backdrop uses the same .modal-backdrop but the inner
-     element is .confirm-dialog, not .modal.  Give it the same treatment. */
+
+  /* ── Confirm dialog: full-screen on mobile ───────────────────── */
   .modal-backdrop .confirm-dialog {
     width: 100%;
     height: 100%;
@@ -951,22 +806,16 @@ a:hover { text-decoration: underline; }
     padding: var(--space-8) var(--space-6);
     gap: var(--space-6);
   }
- 
+
   .confirm-dialog__actions {
     flex-direction: column-reverse;
     gap: var(--space-3);
   }
- 
+
   .confirm-dialog__actions .btn {
     width: 100%;
     justify-content: center;
     min-height: 44px;
   }
- 
-  /* ── Thread modal body: keep the existing max-height but let it fill ── */
-  .thread-body {
-    max-height: none; /* override the desktop 50vh cap */
-    flex: 1 1 auto;
-  }
- 
+
 }

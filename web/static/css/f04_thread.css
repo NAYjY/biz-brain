@@ -23,7 +23,6 @@
   color: var(--color-text);
 }
 
-/* Highlight when there are unread messages */
 .thread-btn[data-unread]:not([data-unread="0"]) {
   border-color: var(--color-accent);
   color: var(--color-accent);
@@ -70,13 +69,8 @@
   max-width: 80%;
 }
 
-.thread-bubble--worker {
-  align-self: flex-start;
-}
-
-.thread-bubble--owner {
-  align-self: flex-end;
-}
+.thread-bubble--worker { align-self: flex-start; }
+.thread-bubble--owner  { align-self: flex-end; }
 
 .thread-bubble__body {
   padding: var(--space-2) var(--space-3);
@@ -88,13 +82,8 @@
   word-break: break-word;
 }
 
-.thread-bubble--worker .thread-bubble__body {
-  background: var(--color-surface-2);
-}
-
-.thread-bubble--owner .thread-bubble__body {
-  background: var(--color-accent-dim);
-}
+.thread-bubble--worker .thread-bubble__body { background: var(--color-surface-2); }
+.thread-bubble--owner  .thread-bubble__body { background: var(--color-accent-dim); }
 
 .thread-bubble__meta {
   font-size: var(--text-xs);
@@ -103,22 +92,21 @@
   padding: 0 2px;
 }
 
-.thread-bubble--owner .thread-bubble__meta {
-  text-align: right;
-}
-/* ── T16-06: Thread modal — mobile keyboard fix ────────────────────── */
+.thread-bubble--owner .thread-bubble__meta { text-align: right; }
+
+/* ── T16-06: Thread modal — mobile keyboard fix ─────────────────────────── */
 
 @media (max-width: 768px) {
   .thread-body {
     flex: 1;
-    max-height: none;                       /* remove the 50vh desktop cap */
+    max-height: none;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
 
   #thread-reply-input {
     min-height: 56px;
-    font-size: 16px;                        /* prevent iOS auto-zoom on focus */
+    font-size: 16px;
   }
 
   .thread-send-row {
