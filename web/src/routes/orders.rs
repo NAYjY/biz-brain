@@ -59,6 +59,12 @@ pub async fn render_orders(
         orders.iter().map(|o| order_row_html(o, &t)).collect::<Vec<_>>().join("\n")
     };
 
+    let orders_cards_html = if orders.is_empty() {
+        format!(r#"<p class="order-cards-empty">{}</p>"#, t.get("orders.empty"))
+    } else {
+        orders.iter().map(|o| order_card_html(o, &t)).collect::<Vec<_>>().join("\n")
+    };
+
     let nudge_html = build_nudge_banner(&orders, &t);
 
     // Build a JSON object of all strings the JS layer needs so we don't need
@@ -131,18 +137,18 @@ pub async fn render_orders(
         <option value="CANCELLED">{s_cancelled}</option>
       </select>
     </div>
-    <div class="form-group" style="margin-bottom:0;min-width:160px;">
+    <div class="form-group">
       <label class="form-label" for="filter-worker">{filter_worker_label}</label>
       <select class="form-select" id="filter-worker">
         <option value="">{filter_all_workers}</option>
       </select>
     </div>
-    <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px;">
+    <div class="form-group">
       <label class="form-label" for="filter-q">{filter_search_label}</label>
       <input class="form-input" id="filter-q" type="search"
              placeholder="{filter_placeholder}" autocomplete="off">
     </div>
-    <button class="btn btn--ghost" id="filter-clear-btn" style="margin-bottom:0;">{filter_clear}</button>
+    <button class="btn btn--ghost" id="filter-clear-btn">{filter_clear}</button>
   </div>
 
   <div class="card">
@@ -158,12 +164,16 @@ pub async fn render_orders(
       </thead>
       <tbody id="orders-tbody">{orders_rows_html}</tbody>
     </table>
+     </div>
+    <div id="orders-cards-list">
+      {orders_cards_html}
+    </div>
     <div id="orders-scroll-sentinel" style="height:1px;"></div>
     <div id="orders-load-status" style="
          text-align:center;padding:var(--space-4);
          font-size:var(--text-sm);color:var(--color-text-muted);display:none;"></div>
   </div>
-</div>
+
 
 <!-- Create Order modal -->
 <div class="modal-backdrop hidden" id="create-order-modal">
@@ -354,6 +364,137 @@ fn order_row_html(o: &store::projection_tables::OrderCurrentState, t: &crate::i1
         due_date           = o.due_date.map(|d| d.to_rfc3339()).unwrap_or_default(),
         thread_btn         = thread_btn,
         ai_badge           = ai_badge,
+    )
+}
+
+fn order_card_html(o: &store::projection_tables::OrderCurrentState, t: &crate::i18n::Translations) -> String {
+    let state_lower   = o.state.to_lowercase();
+    let state_display = state_pill_label(&o.state, t);
+ 
+    // Job-name tag (same as table row)
+    let name_prefix = match &o.short_name {
+        Some(sn) => format!(
+            r#"<span class="order-tag" title="Job name">{}</span> "#,
+            html_escape(sn)
+        ),
+        None => String::new(),
+    };
+ 
+    // Thread button (only when a worker is assigned)
+    let thread_btn = if o.worker_id.is_some() {
+        let unread = o.unread_message_count;
+        let badge = if unread > 0 {
+            format!(r#"<span class="thread-unread-badge">{unread}</span>"#)
+        } else {
+            String::new()
+        };
+        format!(
+            r#"<button class="thread-btn" data-order-id="{id}" data-unread="{unread}"
+                      title="View conversation thread">💬{badge}</button>"#,
+            id     = o.id,
+            unread = unread,
+        )
+    } else {
+        String::new()
+    };
+ 
+    // AI low-confidence badge
+    let ai_badge = if o.ai_routed_low_confidence {
+        r#"<span class="ai-badge" title="AI-routed with low confidence — review recommended">🤖?</span>"#
+            .to_string()
+    } else {
+        String::new()
+    };
+ 
+    // Alert bell
+    let alert_bell = if o.alert_count > 0 {
+        format!(
+            r#"<button class="alert-btn" data-order-id="{id}" data-branch-id="" data-active="true"
+                      title="Follow-up alerts">
+               🔔 <span class="alert-count-badge">{count}</span>
+             </button>"#,
+            id    = o.id,
+            count = o.alert_count,
+        )
+    } else {
+        String::new()
+    };
+ 
+    // Date chips (reuses existing CSS from f05_dates_alerts.css)
+    let start_iso = o.start_date.map(|d| d.to_rfc3339()).unwrap_or_default();
+    let due_iso   = o.due_date.map(|d| d.to_rfc3339()).unwrap_or_default();
+    let dates_html = if o.start_date.is_some() || o.due_date.is_some() {
+        // JS renderDateChips() handles this client-side; for SSR we emit
+        // the raw data attributes and a placeholder the JS will populate.
+        // On truly no-JS mobile the dates won't render — acceptable for v1.
+        format!(
+            r#"<div class="order-card__dates"
+                    data-start-date="{start}" data-due-date="{due}"></div>"#,
+            start = start_iso,
+            due   = due_iso,
+        )
+    } else {
+        String::new()
+    };
+ 
+    // Worker name
+    let worker_name = o.worker_name.as_deref().unwrap_or("—");
+ 
+    format!(
+        r#"<div class="order-card"
+               data-order-id="{id}"
+               data-state="{state}"
+               data-short-name="{short_name_escaped}"
+               data-start-date="{start_date}"
+               data-due-date="{due_date}">
+ 
+  <!-- header: pill + gear -->
+  <div class="order-card__header">
+    <span class="state-pill state-pill--{state_lower}">{state_display}</span>
+    <div class="order-card-gear-wrap" data-order-id="{id}"
+         style="position:relative;display:inline-block;"></div>
+  </div>
+ 
+  <!-- description with optional job-name tag -->
+  <div class="order-card__desc">
+    {name_prefix}<span class="order-desc" id="desc-{id}">{desc}</span>
+  </div>
+ 
+  <!-- divider -->
+  <div class="order-card__divider"></div>
+ 
+  <!-- meta: customer · worker -->
+  <div class="order-card__meta">
+    <span>{customer_short}</span>
+    <span class="order-card__meta-sep">·</span>
+    <span id="worker-{id}">{worker}</span>
+  </div>
+ 
+  <!-- date chips (populated by JS renderDateChips) -->
+  {dates_html}
+ 
+  <!-- action buttons -->
+  <div class="order-card__actions">
+    {thread_btn}
+    {ai_badge}
+    {alert_bell}
+  </div>
+</div>"#,
+        id                  = o.id,
+        state               = o.state,
+        state_lower         = state_lower,
+        state_display       = state_display,
+        name_prefix         = name_prefix,
+        desc                = html_escape(&o.description),
+        short_name_escaped  = html_escape(o.short_name.as_deref().unwrap_or("")),
+        customer_short      = &o.customer_id.to_string()[..8],
+        worker              = html_escape(worker_name),
+        start_date          = start_iso,
+        due_date            = due_iso,
+        dates_html          = dates_html,
+        thread_btn          = thread_btn,
+        ai_badge            = ai_badge,
+        alert_bell          = alert_bell,
     )
 }
 

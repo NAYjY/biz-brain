@@ -90,17 +90,52 @@ function initOrdersPage(branchId, initialCursor) {
   }
 
   function appendRows(orders) {
-    const tbody = document.getElementById('orders-tbody');
-    if (!tbody) return;
+  const tbody     = document.getElementById('orders-tbody');
+  const cardsList = document.getElementById('orders-cards-list');
+ 
+  // Remove empty-state placeholders
+  if (tbody) {
     const emptyRow = tbody.querySelector('td[colspan]');
     if (emptyRow) emptyRow.closest('tr')?.remove();
-    for (const o of orders) {
+  }
+  if (cardsList) {
+    const emptyCard = cardsList.querySelector('.order-cards-empty');
+    if (emptyCard) emptyCard.remove();
+  }
+ 
+  for (const o of orders) {
+    // Desktop table row
+    if (tbody) {
       const tr = document.createElement('tr');
       tr.innerHTML = orderRowHtml(o);
       tbody.appendChild(tr);
     }
-    attachRowActions();
+ 
+    // Mobile card
+    if (cardsList) {
+      const div = document.createElement('div');
+      div.innerHTML = orderCardHtml(o);
+      // orderCardHtml returns a single root .order-card div; grab it
+      const card = div.firstElementChild;
+      if (card) cardsList.appendChild(card);
+    }
   }
+
+  function hydrateSsrCardDates() {
+    document.querySelectorAll('.order-card__dates[data-start-date], .order-card__dates[data-due-date]')
+      .forEach(el => {
+        if (!window.renderDateChips) return;
+        const start = el.dataset.startDate || null;
+        const due   = el.dataset.dueDate   || null;
+        if (!start && !due) return;
+        const html = window.renderDateChips(start || null, due || null);
+        if (html) el.innerHTML = html;
+      });
+  }
+ 
+  attachRowActions();
+  hydrateSsrCardDates();
+}
 
   // ── Filter bar ────────────────────────────────────────────────────── //
 
@@ -168,7 +203,7 @@ function initOrdersPage(branchId, initialCursor) {
   async function refreshOrderList() {
     isLoading = true;
     setStatus('');
-
+  
     const qs = filterToParams(currentFilter(), null);
     let data;
     try {
@@ -178,17 +213,29 @@ function initOrdersPage(branchId, initialCursor) {
       isLoading = false;
       return;
     }
-
-    const tbody = document.getElementById('orders-tbody');
-    if (!tbody) { isLoading = false; return; }
-
+  
+    const tbody     = document.getElementById('orders-tbody');
+    const cardsList = document.getElementById('orders-cards-list');
+  
     if (data.items.length === 0) {
-      tbody.innerHTML =
-        '<tr><td colspan="5" class="data-table__empty">No orders yet.</td></tr>';
+      const emptyMsg = 'No orders yet.';
+      if (tbody) {
+        tbody.innerHTML =
+          `<tr><td colspan="5" class="data-table__empty">${emptyMsg}</td></tr>`;
+      }
+      if (cardsList) {
+        cardsList.innerHTML =
+          `<p class="order-cards-empty">${emptyMsg}</p>`;
+      }
     } else {
-      tbody.innerHTML = data.items.map(orderRowHtml).join('');
+      if (tbody) {
+        tbody.innerHTML = data.items.map(orderRowHtml).join('');
+      }
+      if (cardsList) {
+        cardsList.innerHTML = data.items.map(orderCardHtml).join('');
+      }
     }
-
+  
     attachRowActions();
     nextCursor = data.next_cursor ?? null;
     allLoaded  = !nextCursor;
@@ -255,14 +302,113 @@ function initOrdersPage(branchId, initialCursor) {
       </tr>`;
   }
 
+  function orderCardHtml(o) {
+    const pill      = BB.statePill(o.state);
+    const customer  = BB.escapeHtml(customerMap[o.customer_id] || BB.shortId(o.customer_id));
+    const worker    = o.worker_name ? BB.escapeHtml(o.worker_name) : '—';
+  
+    const namePrefix = o.short_name
+      ? `<span class="order-tag" title="Job name">${BB.escapeHtml(o.short_name)}</span> `
+      : '';
+  
+    let threadBtn = '';
+    if (o.worker_id) {
+      const unread = o.unread_message_count || 0;
+      const badge  = unread > 0
+        ? ` <span class="thread-unread-badge">${unread}</span>`
+        : '';
+      threadBtn = `<button class="thread-btn"
+          data-order-id="${o.id}" data-unread="${unread}"
+          title="View conversation thread">💬${badge}</button>`;
+    }
+  
+    const aiBadge = o.ai_routed_low_confidence
+      ? `<span class="ai-badge" title="AI-routed with low confidence — review recommended">🤖?</span>`
+      : '';
+  
+    const alertBell = o.alert_count > 0
+      ? `<button class="alert-btn" data-order-id="${o.id}" data-branch-id="${branchId}"
+                data-active="true" title="Follow-up alerts">
+          🔔 <span class="alert-count-badge">${o.alert_count}</span>
+        </button>`
+      : '';
+  
+    // Date chips: render via the same helper as the table row (f05_alerts.js)
+    const datePart = window.renderDateChips
+      ? window.renderDateChips(o.start_date, o.due_date)
+      : '';
+  
+    return `
+      <div class="order-card"
+          data-order-id="${o.id}"
+          data-state="${o.state}"
+          data-short-name="${BB.escapeHtml(o.short_name || '')}"
+          data-start-date="${o.start_date ?? ''}"
+          data-due-date="${o.due_date ?? ''}">
+  
+        <!-- header: pill + gear -->
+        <div class="order-card__header">
+          ${pill}
+          <div class="order-card-gear-wrap" data-order-id="${o.id}"
+              style="position:relative;display:inline-block;"></div>
+        </div>
+  
+        <!-- description -->
+        <div class="order-card__desc">
+          ${namePrefix}<span class="order-desc" id="desc-${o.id}">${BB.escapeHtml(o.description)}</span>
+        </div>
+  
+        <!-- divider -->
+        <div class="order-card__divider"></div>
+  
+        <!-- meta -->
+        <div class="order-card__meta">
+          <span>${customer}</span>
+          <span class="order-card__meta-sep">·</span>
+          <span id="worker-${o.id}">${worker}</span>
+        </div>
+  
+        ${datePart ? `<div class="order-card__dates">${datePart}</div>` : ''}
+  
+        <!-- action buttons -->
+        <div class="order-card__actions">
+          ${threadBtn}${aiBadge}${alertBell}
+        </div>
+      </div>`;
+  }
+
+
   function attachRowActions() {
+    // Desktop: gear wraps in table rows
     document.querySelectorAll('.order-gear-wrap').forEach(renderGearButton);
+    // Mobile: gear wraps in cards (same renderGearButton logic)
+    document.querySelectorAll('.order-card-gear-wrap').forEach(renderGearButton);
+  
+    // Thread buttons exist in both contexts — single selector covers both
     document.querySelectorAll('.thread-btn').forEach(btn => {
+      // Avoid double-binding if already wired
+      if (btn.dataset.wired) return;
+      btn.dataset.wired = '1';
       btn.addEventListener('click', () => {
         const orderId = btn.dataset.orderId;
-        const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
-        const desc = row?.querySelector('.order-desc')?.textContent ?? orderId;
+        // Look for .order-desc in table row OR card
+        const desc =
+          document.querySelector(`[data-order-id="${orderId}"] .order-desc`)
+            ?.textContent ?? orderId;
         openThreadModal(orderId, desc);
+      });
+    });
+  
+    // Alert buttons (f05_alerts.js openAlertsModal is already global)
+    document.querySelectorAll('.alert-btn').forEach(btn => {
+      if (btn.dataset.wired) return;
+      btn.dataset.wired = '1';
+      btn.addEventListener('click', () => {
+        const orderId = btn.dataset.orderId;
+        const desc =
+          document.querySelector(`[data-order-id="${orderId}"] .order-desc`)
+            ?.textContent ?? orderId;
+        openAlertsModal(orderId, desc, api);
       });
     });
   }
@@ -827,6 +973,9 @@ function initOrdersPage(branchId, initialCursor) {
       await api(`/orders/${orderId}`, { method: 'DELETE' });
       const row = document.querySelector(`tr[data-order-id="${orderId}"]`);
       row?.remove();
+      // mobile card (T16-02)
+      const card = document.querySelector(`.order-card[data-order-id="${orderId}"]`);
+      card?.remove()
       maybeShowEmpty();
       BB.showToast('Order deleted', 'success');
     } catch (e) {
@@ -835,9 +984,21 @@ function initOrdersPage(branchId, initialCursor) {
   }
 
   function maybeShowEmpty() {
-    const tbody = document.getElementById('orders-tbody');
-    if (tbody && tbody.querySelectorAll('tr[data-order-id]').length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" class="data-table__empty">No orders yet.</td></tr>';
+    const tbody     = document.getElementById('orders-tbody');
+    const cardsList = document.getElementById('orders-cards-list');
+  
+    const tableEmpty = tbody &&
+      tbody.querySelectorAll('tr[data-order-id]').length === 0;
+    const cardsEmpty = cardsList &&
+      cardsList.querySelectorAll('.order-card').length === 0;
+  
+    if (tableEmpty && tbody) {
+      tbody.innerHTML =
+        '<tr><td colspan="5" class="data-table__empty">No orders yet.</td></tr>';
+    }
+    if (cardsEmpty && cardsList) {
+      cardsList.innerHTML =
+        '<p class="order-cards-empty">No orders yet.</p>';
     }
   }
 

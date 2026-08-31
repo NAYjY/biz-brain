@@ -1,0 +1,108 @@
+/* ═══════════════════════════════════════════════════════════════════
+   T16-02: Orders card layout (mobile)
+   File: web/static/css/mobile-cards.css
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Card list container ─────────────────────────────────────────── */
+
+#orders-cards-list {
+  display: none; /* hidden by default; shown below ≤768px */
+}
+
+@media (max-width: 768px) {
+  #orders-cards-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: 0; /* .page already handles outer padding */
+  }
+}
+
+/* ── Individual card ─────────────────────────────────────────────── */
+
+.order-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  /* Cards only exist inside #orders-cards-list which is display:none
+     on desktop, so no need to re-hide the cards themselves. */
+}
+
+/* ── Card header: pill + gear ────────────────────────────────────── */
+
+.order-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+/* ── Description line ────────────────────────────────────────────── */
+
+.order-card__desc {
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* ── Divider ─────────────────────────────────────────────────────── */
+
+.order-card__divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: var(--space-1) 0;
+}
+
+/* ── Meta line: customer · worker ────────────────────────────────── */
+
+.order-card__meta {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.order-card__meta-sep {
+  opacity: 0.4;
+}
+
+/* ── Date chips row ──────────────────────────────────────────────── */
+
+.order-card__dates {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* ── Bottom actions: thread, alert bell ──────────────────────────── */
+
+.order-card__actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: var(--space-1);
+}
+
+/* ── Gear wrap on card (same selector pattern as table rows) ─────── */
+
+.order-card-gear-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+/* ── Empty-state card ────────────────────────────────────────────── */
+
+.order-cards-empty {
+  padding: var(--space-10);
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}

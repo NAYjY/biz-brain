@@ -95,8 +95,8 @@ pub async fn render_supply_requests(
     </div>
   </div>
 
-  <div style="display:flex;gap:var(--space-3);align-items:flex-end;margin-bottom:var(--space-4);">
-    <div class="form-group" style="margin-bottom:0;min-width:180px;">
+  <div class="filter-bar">
+    <div class="form-group">
       <label class="form-label" for="sr-filter-state">{filter_state_label}</label>
       <select class="form-select" id="sr-filter-state">
         <option value="">{filter_all}</option>

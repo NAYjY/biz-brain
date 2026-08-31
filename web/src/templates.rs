@@ -22,6 +22,7 @@ pub fn shell_open(title: &str, lang: &str) -> String {
   <link rel="stylesheet" href="/static/css/f04_thread.css">
   <link rel="stylesheet" href="/static/css/f01_order_tag.css">
   <link rel="stylesheet" href="/static/css/f05_dates_alerts.css">
+  <link rel="stylesheet" href="/static/css/mobile-cards.css">
 </head>
 <body>
 <div class="app-layout">"#,
@@ -175,7 +176,16 @@ pub fn topbar_html(
   color: var(--color-text-muted);
   padding: var(--space-1) var(--space-2);
 }}
-</style>"#,
+</style>
+<script>
+        // T16-09: scroll active nav link into view on mobile load
+        (function () {{
+          var active = document.querySelector('.topbar__nav a.active');
+          if (active) {{
+            active.scrollIntoView({{ inline: 'center', block: 'nearest' }});
+          }}
+        }})();
+      </script>"#,
         switcher_html = switcher_html,
         locale_switcher = locale_switcher,
         orders    = nav_item("/orders",          t.get("nav.orders"),           "orders"),
