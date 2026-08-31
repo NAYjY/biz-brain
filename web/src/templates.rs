@@ -1,5 +1,6 @@
-//! D03/D07/T11: shared HTML shell fragments used by all SSR page handlers.
+//! D03/D07/T11/T21: shared HTML shell fragments used by all SSR page handlers.
 //! T11: all chrome strings now go through `&Translations` — never hardcoded.
+//! T21: topbar_html gains a Settings nav item (Owner-only).
 
 use axum::response::{Html, IntoResponse, Response};
 use axum::http::HeaderMap;
@@ -77,6 +78,7 @@ pub async fn load_topbar_data(
 }
 
 /// Render the shared topbar with branch switcher, nav, account link, and locale switcher.
+/// T21: Settings nav item shown only when the caller is an Owner.
 pub fn topbar_html(
     branch_id: Uuid,
     branch_name: &str,
@@ -85,13 +87,41 @@ pub fn topbar_html(
     t: &Translations,
     current_path: &str,
 ) -> String {
+    topbar_html_inner(branch_id, branch_name, all_branches, active_page, t, current_path, true)
+}
+
+/// Variant used by pages where we know the caller's role.
+/// Pass `is_owner = false` to hide the Settings nav item for Managers.
+/// Most callers use `topbar_html` which defaults to showing Settings;
+/// the settings page itself is protected server-side regardless.
+pub fn topbar_html_for_role(
+    branch_id: Uuid,
+    branch_name: &str,
+    all_branches: &[(Uuid, String)],
+    active_page: &str,
+    t: &Translations,
+    current_path: &str,
+    is_owner: bool,
+) -> String {
+    topbar_html_inner(branch_id, branch_name, all_branches, active_page, t, current_path, is_owner)
+}
+
+fn topbar_html_inner(
+    branch_id: Uuid,
+    branch_name: &str,
+    all_branches: &[(Uuid, String)],
+    active_page: &str,
+    t: &Translations,
+    current_path: &str,
+    show_settings: bool,
+) -> String {
     let nav_item = |href: &str, label: &str, page: &str| {
         let active = if active_page == page { " active" } else { "" };
         format!(
             r#"<li><a href="/branches/{bid}{href}" class="{active}">{label}</a></li>"#,
-            bid = branch_id,
-            href = href,
-            label = label,
+            bid    = branch_id,
+            href   = href,
+            label  = label,
             active = active,
         )
     };
@@ -108,8 +138,8 @@ pub fn topbar_html(
                 let selected = if *id == branch_id { " selected" } else { "" };
                 format!(
                     r#"<option value="{id}"{selected}>{name}</option>"#,
-                    id = id,
-                    name = html_escape(name),
+                    id       = id,
+                    name     = html_escape(name),
                     selected = selected,
                 )
             })
@@ -125,6 +155,13 @@ pub fn topbar_html(
         )
     };
 
+    // T21: Settings item only for Owners.
+    let settings_item = if show_settings {
+        nav_item("/settings", t.get("nav.settings"), "settings")
+    } else {
+        String::new()
+    };
+
     let locale_switcher = locale_switcher_html(t.locale, current_path);
 
     format!(
@@ -138,6 +175,7 @@ pub fn topbar_html(
       {workers}
       {suppliers}
       {actors}
+      {settings_item}
     </ul>
   </nav>
   <div class="topbar__actions">
@@ -188,13 +226,14 @@ pub fn topbar_html(
       </script>"#,
         switcher_html = switcher_html,
         locale_switcher = locale_switcher,
-        orders    = nav_item("/orders",          t.get("nav.orders"),           "orders"),
-        supply    = nav_item("/supply-requests", t.get("nav.supply"),           "supply-requests"),
-        workers   = nav_item("/workers",         t.get("nav.workers"),          "workers"),
-        suppliers = nav_item("/suppliers",       t.get("nav.suppliers"),        "suppliers"),
-        actors    = nav_item("/actors",          t.get("nav.pending_bindings"), "actors"),
-        account   = t.get("nav.account"),
-        sign_out  = t.get("nav.sign_out"),
+        orders        = nav_item("/orders",          t.get("nav.orders"),           "orders"),
+        supply        = nav_item("/supply-requests", t.get("nav.supply"),           "supply-requests"),
+        workers       = nav_item("/workers",         t.get("nav.workers"),          "workers"),
+        suppliers     = nav_item("/suppliers",       t.get("nav.suppliers"),        "suppliers"),
+        actors        = nav_item("/actors",          t.get("nav.pending_bindings"), "actors"),
+        settings_item = settings_item,
+        account       = t.get("nav.account"),
+        sign_out      = t.get("nav.sign_out"),
     )
 }
 

@@ -6,6 +6,7 @@ pub mod locale;
 pub mod login;
 pub mod logout;
 pub mod orders;
+pub mod settings;
 pub mod sse_relay;
 pub mod supply_requests;
 pub mod suppliers;

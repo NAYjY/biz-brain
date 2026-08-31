@@ -391,6 +391,37 @@ fn english() -> HashMap<&'static str, &'static str> {
     m.insert("live.live",          "Live");
     m.insert("live.reconnecting",  "Reconnecting…");
 
+    // ── Settings page (T21) ──────────────────────────────────────── //
+    m.insert("nav.settings",                    "Settings");
+    m.insert("settings.page_title",             "Branch Settings — Biz-Brain");
+    m.insert("settings.title",                  "Branch Settings");
+    m.insert("settings.branch_name.heading",    "Branch name");
+    m.insert("settings.branch_name.label",      "Name");
+    m.insert("settings.branch_name.save",       "Save");
+    m.insert("settings.branch_name.saved",      "✓ Branch renamed.");
+    m.insert("settings.ai.heading",             "AI provider");
+    m.insert("settings.ai.desc",                "Controls which model classifies inbound Worker and Supplier messages for this branch. Claude is the default and recommended option.");
+    m.insert("settings.ai.label",               "Provider");
+    m.insert("settings.ai.claude",              "Claude (Anthropic) — default");
+    m.insert("settings.ai.gemini",              "Gemini (Google)");
+    m.insert("settings.ai.save",                "Save");
+    m.insert("settings.managers.heading",       "Managers");
+    m.insert("settings.managers.desc",          "Managers can view and operate orders, workers, and suppliers for this branch, but cannot access branch settings or manage other users.");
+    m.insert("settings.managers.col_email",     "Email");
+    m.insert("settings.managers.empty",         "No managers have access to this branch yet.");
+    m.insert("settings.managers.add_heading",   "Add Manager");
+    m.insert("settings.managers.add_desc",      "Enter the Manager's email. If they don't have a Biz-Brain account yet, also set a password to create one. If they already have an account, leave the password blank.");
+    m.insert("settings.managers.email_label",   "Email");
+    m.insert("settings.managers.pw_label",      "Password");
+    m.insert("settings.managers.pw_hint",       "(only needed for a new account — min 8 chars)");
+    m.insert("settings.managers.pw_ph",         "Leave blank to grant an existing account");
+    m.insert("settings.managers.grant_btn",     "Grant Access");
+    m.insert("settings.managers.revoking",      "Working…");
+    m.insert("settings.managers.revoke_btn",    "Revoke");
+    m.insert("settings.managers.revoke_confirm","Revoke {email}'s access to this branch? They will be signed out on their next request.");
+    m.insert("settings.managers.revoked",       "access revoked.");
+    m.insert("settings.managers.granted",       "now has access to this branch.");
+    
     m
 }
 
@@ -630,6 +661,37 @@ fn thai() -> HashMap<&'static str, &'static str> {
     m.insert("live.connecting",   "กำลังเชื่อมต่อ…");
     m.insert("live.live",         "ออนไลน์");
     m.insert("live.reconnecting", "กำลังเชื่อมต่อใหม่…");
+
+    // ── Settings page (T21) ──────────────────────────────────────── //
+    m.insert("nav.settings",                    "ตั้งค่า");
+    m.insert("settings.page_title",             "ตั้งค่าสาขา — Biz-Brain");
+    m.insert("settings.title",                  "ตั้งค่าสาขา");
+    m.insert("settings.branch_name.heading",    "ชื่อสาขา");
+    m.insert("settings.branch_name.label",      "ชื่อ");
+    m.insert("settings.branch_name.save",       "บันทึก");
+    m.insert("settings.branch_name.saved",      "✓ เปลี่ยนชื่อสาขาแล้ว");
+    m.insert("settings.ai.heading",             "AI Provider");
+    m.insert("settings.ai.desc",                "เลือก AI ที่ใช้จำแนกข้อความจากพนักงานและซัพพลายเออร์ในสาขานี้ Claude เป็นตัวเลือกเริ่มต้น");
+    m.insert("settings.ai.label",               "Provider");
+    m.insert("settings.ai.claude",              "Claude (Anthropic) — ค่าเริ่มต้น");
+    m.insert("settings.ai.gemini",              "Gemini (Google)");
+    m.insert("settings.ai.save",                "บันทึก");
+    m.insert("settings.managers.heading",       "ผู้จัดการ");
+    m.insert("settings.managers.desc",          "ผู้จัดการสามารถดูและดำเนินงาน คำสั่งงาน พนักงาน และซัพพลายเออร์ของสาขานี้ แต่ไม่สามารถเข้าถึงการตั้งค่าหรือจัดการผู้ใช้อื่นได้");
+    m.insert("settings.managers.col_email",     "อีเมล");
+    m.insert("settings.managers.empty",         "ยังไม่มีผู้จัดการในสาขานี้");
+    m.insert("settings.managers.add_heading",   "เพิ่มผู้จัดการ");
+    m.insert("settings.managers.add_desc",      "กรอกอีเมลของผู้จัดการ หากยังไม่มีบัญชี ให้กรอกรหัสผ่านด้วยเพื่อสร้างบัญชีให้ หากมีบัญชีแล้ว ให้เว้นรหัสผ่านว่างไว้");
+    m.insert("settings.managers.email_label",   "อีเมล");
+    m.insert("settings.managers.pw_label",      "รหัสผ่าน");
+    m.insert("settings.managers.pw_hint",       "(สำหรับบัญชีใหม่เท่านั้น — ขั้นต่ำ 8 ตัวอักษร)");
+    m.insert("settings.managers.pw_ph",         "เว้นว่างหากมีบัญชีอยู่แล้ว");
+    m.insert("settings.managers.grant_btn",     "ให้สิทธิ์เข้าถึง");
+    m.insert("settings.managers.revoking",      "กำลังดำเนินการ…");
+    m.insert("settings.managers.revoke_btn",    "ยกเลิกสิทธิ์");
+    m.insert("settings.managers.revoke_confirm","ยกเลิกสิทธิ์ของ {email} ในสาขานี้?");
+    m.insert("settings.managers.revoked",       "ยกเลิกสิทธิ์แล้ว");
+    m.insert("settings.managers.granted",       "ได้รับสิทธิ์เข้าถึงสาขานี้แล้ว");
 
     m
 }

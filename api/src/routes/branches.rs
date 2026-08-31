@@ -1,9 +1,13 @@
-//! D02 / P01 / T01 / T20: Branch management.
+//! D02 / P01 / T01 / T20 / T21: Branch management.
 //! T20: `owner_id` → `created_by_user_id`. Creating branches is Owner-only.
 //!      Manager management endpoints (create, grant, revoke) are Owner-only.
+//! T21: `rename_branch` (PATCH) and `lookup_manager` (GET ?email=) added.
 
-use axum::{extract::State, http::StatusCode, Json};
-use axum::extract::Path;
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -26,12 +30,11 @@ pub struct BranchView {
 }
 
 /// GET /api/v1/branches — returns all branches the caller can access.
-/// Owners see all; Managers see their granted subset (already in JWT branch_ids).
+/// Owners see all; Managers see only their granted subset (already in JWT branch_ids).
 pub async fn list_branches(
     AuthedOwner(claims): AuthedOwner,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<BranchView>>, (StatusCode, String)> {
-    // branch_ids is embedded in the JWT — filter to just those.
     let rows: Vec<(Uuid, String, String)> = if claims.is_owner() {
         sqlx::query_as(
             "SELECT id, name, ai_provider FROM branches ORDER BY created_at ASC",
@@ -40,7 +43,6 @@ pub async fn list_branches(
         .await
         .map_err(internal)?
     } else {
-        // Manager: only granted branches.
         sqlx::query_as(
             "SELECT b.id, b.name, b.ai_provider \
              FROM branches b \
@@ -97,6 +99,42 @@ pub async fn create_branch(
     Ok((StatusCode::CREATED, Json(CreateBranchResponse { id })))
 }
 
+// ── T21: Rename branch (Owner-only) ──────────────────────────────────────── //
+
+#[derive(Debug, Deserialize)]
+pub struct RenameBranchRequest {
+    pub name: String,
+}
+
+/// PATCH /api/v1/branches/:branch_id — rename a branch.
+pub async fn rename_branch(
+    AuthedOwnerOnly(_claims): AuthedOwnerOnly,
+    Path(branch_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Json(req): Json<RenameBranchRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name required".to_string()));
+    }
+    if name.len() > 255 {
+        return Err((StatusCode::BAD_REQUEST, "name max 255 characters".to_string()));
+    }
+
+    let result = sqlx::query("UPDATE branches SET name = $1 WHERE id = $2")
+        .bind(&name)
+        .bind(branch_id)
+        .execute(&state.pool)
+        .await
+        .map_err(internal)?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "branch not found".to_string()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── T01: Set AI provider (Owner-only) ─────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]
@@ -127,7 +165,6 @@ pub async fn set_ai_provider(
         }
     };
 
-    // Verify the branch is accessible to this Owner.
     let owns: Option<(i32,)> = sqlx::query_as(
         "SELECT 1 FROM branches WHERE id = $1",
     )
@@ -197,6 +234,35 @@ pub async fn create_manager(
     })?;
 
     Ok((StatusCode::CREATED, Json(ManagerView { id, email: name })))
+}
+
+/// GET /api/v1/managers?email= — T21: look up an existing Manager by email.
+#[derive(Debug, Deserialize)]
+pub struct ManagerLookupQuery {
+    pub email: Option<String>,
+}
+
+pub async fn lookup_manager(
+    AuthedOwnerOnly(_claims): AuthedOwnerOnly,
+    Query(params): Query<ManagerLookupQuery>,
+    State(state): State<AppState>,
+) -> Result<Json<ManagerView>, (StatusCode, String)> {
+    let email = params.email.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "email query parameter required".to_string())
+    })?;
+
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, email FROM users WHERE email = $1 AND role = 'manager'",
+    )
+    .bind(email.trim())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+
+    match row {
+        Some((id, email)) => Ok(Json(ManagerView { id, email })),
+        None => Err((StatusCode::NOT_FOUND, "Manager not found".to_string())),
+    }
 }
 
 /// GET /api/v1/branches/:branch_id/managers — list Managers with access to this branch.

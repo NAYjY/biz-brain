@@ -1,8 +1,9 @@
-//! Web crate (T06 / D01-D07 / T11 / T12 / T13 / T20 / T10): SSR dashboard.
+//! Web crate (T06 / D01-D07 / T11 / T12 / T13 / T20 / T10 / T21): SSR dashboard.
 //! T11: i18n module + /locale switcher endpoint.
 //! T12: /branches route added (branch list + create).
 //! T13: /account/settings added.
 //! T10: /branches/:branch_id/suppliers added.
+//! T21: /branches/:branch_id/settings added (Owner-only).
 
 #![warn(clippy::all)]
 
@@ -42,6 +43,8 @@ pub fn build_router() -> Router<AppState> {
         // T10: Suppliers page
         .route("/branches/:branch_id/suppliers",       get(routes::suppliers::render_suppliers))
         .route("/branches/:branch_id/actors",          get(routes::actors::render_actors))
+        // T21: Branch settings (Owner-only)
+        .route("/branches/:branch_id/settings",        get(routes::settings::render_settings))
         // T07: browser-facing SSE relay
         .route("/branches/:branch_id/events", get(routes::sse_relay::relay_branch_events))
 }

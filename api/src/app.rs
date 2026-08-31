@@ -1,6 +1,7 @@
-//! T05 / P04 / P16 / T20 / T13: REST endpoints, webhooks, SSE.
+//! T05 / P04 / P16 / T20 / T13 / T21: REST endpoints, webhooks, SSE.
 //! T10: supplier routes added.
 //! T13: /api/v1/account/change-password added.
+//! T21: rename_branch (PATCH /branches/:id) and lookup_manager (GET /managers?email=) added.
 
 use axum::{
     routing::{delete, get, patch, post},
@@ -86,13 +87,22 @@ pub fn build_router() -> Router<AppState> {
             "/branches",
             get(routes::branches::list_branches).post(routes::branches::create_branch),
         )
+        // T21: rename branch
+        .route(
+            "/branches/:branch_id",
+            patch(routes::branches::rename_branch),
+        )
         // T01: per-branch AI provider selection (Owner-only)
         .route(
             "/branches/:branch_id/ai-provider",
             patch(routes::branches::set_ai_provider),
         )
         // T20: Manager creation (Owner-only, not branch-scoped)
-        .route("/managers", post(routes::branches::create_manager))
+        // T21: GET with ?email= for lookup, POST to create
+        .route(
+            "/managers",
+            get(routes::branches::lookup_manager).post(routes::branches::create_manager),
+        )
         // T13: account settings (any authenticated user)
         .route("/account/change-password", post(routes::account::change_password));
 
