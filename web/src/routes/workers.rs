@@ -1,4 +1,4 @@
-//! Worker onboarding page — T11: fully translated.
+//! Worker onboarding page — T11: fully translated. T16-04: mobile card layout.
 
 use axum::{
     extract::{Path, State},
@@ -63,6 +63,21 @@ pub async fn render_workers(
             .join("\n")
     };
 
+    // T16-04: mobile card list
+    let cards_html = if rows.is_empty() {
+        format!(
+            r#"<p class="workers-cards-empty">{}</p>"#,
+            t.get("workers.empty")
+        )
+    } else {
+        rows.iter()
+            .map(|(id, name, channel, external_id)| {
+                worker_card_html(*id, name, channel.as_deref(), external_id.as_deref(), &t)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     let actors_href = format!("/branches/{branch_id}/actors");
 
     let html = format!(
@@ -90,7 +105,8 @@ pub async fn render_workers(
     </ol>
   </div>
 
-  <div class="card">
+  <!-- Desktop table (hidden on mobile) -->
+  <div class="card desktop-only">
     <table class="data-table" id="workers-table">
       <thead>
         <tr>
@@ -100,6 +116,9 @@ pub async fn render_workers(
       <tbody id="workers-tbody">{rows_html}</tbody>
     </table>
   </div>
+
+  <!-- Mobile card list (T16-04, hidden on desktop) -->
+  <div id="workers-cards-list">{cards_html}</div>
 </div>
 
 <!-- Create Worker modal -->
@@ -145,6 +164,7 @@ pub async fn render_workers(
         col_sender     = t.get("workers.col.sender"),
         col_actions    = t.get("workers.col.actions"),
         rows_html      = rows_html,
+        cards_html     = cards_html,
         modal_title    = t.get("workers.create.title"),
         name_label     = t.get("workers.create.name_label"),
         name_ph        = t.get("workers.create.name_ph"),
@@ -200,5 +220,52 @@ fn worker_row_html(
         binding_cell = binding_cell,
         channel_cell = channel_cell,
         remove       = t.get("btn.remove"),
+    )
+}
+
+/// T16-04: Mobile card for a single worker row.
+fn worker_card_html(
+    id: Uuid,
+    name: &str,
+    channel: Option<&str>,
+    external_id: Option<&str>,
+    t: &Translations,
+) -> String {
+    let binding_html = match (channel, external_id) {
+        (Some(ch), Some(ext)) => {
+            let label = match ch {
+                "line"      => "LINE",
+                "whats_app" => "WhatsApp",
+                "telegram"  => "Telegram",
+                other       => other,
+            };
+            format!(
+                r#"<div class="worker-card__binding">
+    <span class="channel-badge channel-badge--{slug}">{label}</span>
+    <span class="worker-card__sender">{ext}</span>
+  </div>"#,
+                slug  = ch.replace('_', "-"),
+                label = label,
+                ext   = html_escape(ext),
+            )
+        }
+        _ => format!(
+            r#"<span class="text-muted text-xs">{}</span>"#,
+            t.get("workers.not_bound")
+        ),
+    };
+
+    format!(
+        r#"<div class="worker-card" data-worker-id="{id}">
+  <div class="worker-card__header">
+    <span class="worker-card__name">{name}</span>
+    <button class="btn btn--ghost btn--sm" onclick="workerDelete('{id}')">{remove}</button>
+  </div>
+  {binding_html}
+</div>"#,
+        id           = id,
+        name         = html_escape(name),
+        remove       = t.get("btn.remove"),
+        binding_html = binding_html,
     )
 }

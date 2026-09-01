@@ -198,3 +198,130 @@
   color: var(--color-text-muted);
   font-size: var(--text-sm);
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   T16-04: Workers, Suppliers, Actors card layout (mobile)
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Shared card list containers ─────────────────────────────────── */
+
+#workers-cards-list,
+#suppliers-cards-list,
+#actors-cards-list {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  #workers-cards-list,
+  #suppliers-cards-list,
+  #actors-cards-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: 0;
+  }
+}
+
+/* ── Worker / Supplier card ──────────────────────────────────────── */
+
+.worker-card,
+.supplier-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.worker-card__header,
+.supplier-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.worker-card__name,
+.supplier-card__name {
+  font-size: var(--text-base);
+  font-weight: 500;
+  color: var(--color-text);
+  word-break: break-word;
+}
+
+.worker-card__binding,
+.supplier-card__binding {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.worker-card__sender,
+.supplier-card__sender {
+  font-size: var(--text-xs);
+  font-family: monospace;
+  color: var(--color-text-muted);
+  word-break: break-all;
+}
+
+/* ── Actor (pending binding) card ────────────────────────────────── */
+
+.actor-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.actor-card__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.actor-card__type {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.actor-card__sender {
+  font-size: var(--text-sm);
+  font-family: monospace;
+  color: var(--color-text);
+  word-break: break-all;
+}
+
+.actor-card__seen {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.actor-card__actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: var(--space-1);
+}
+
+/* ── Empty states ────────────────────────────────────────────────── */
+
+.workers-cards-empty,
+.suppliers-cards-empty,
+.actors-cards-empty {
+  padding: var(--space-10);
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}

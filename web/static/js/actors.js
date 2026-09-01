@@ -3,13 +3,17 @@
  *
  * Confirm: Owner picks which Worker this sender maps to from a dropdown.
  * Reject: removes the pending row; next message re-creates it.
+ *
+ * T16-04: removeRow() removes from both the desktop table row (#actors-tbody)
+ *         and the mobile card (.actor-card[data-binding-id]) so both views
+ *         stay in sync after a confirm or reject action.
  */
 
 function initActorsPage(branchId) {
   const api = (path, opts) =>
     BB.apiFetch(`/api/v1/branches/${branchId}${path}`, opts);
 
-  // ── Confirm ───────────────────────────────────────────────────────── //
+  // ── Confirm ───────────────────────────────────────────────────── //
 
   window.actorConfirm = async (bindingId) => {
     // Load workers for this branch so Owner can pick which one
@@ -79,7 +83,7 @@ function initActorsPage(branchId) {
     });
   };
 
-  // ── Reject ────────────────────────────────────────────────────────── //
+  // ── Reject ────────────────────────────────────────────────────── //
 
   window.actorReject = async (bindingId) => {
     const ok = await BB.confirm(
@@ -96,18 +100,29 @@ function initActorsPage(branchId) {
     }
   };
 
-  // ── Helpers ───────────────────────────────────────────────────────── //
+  // ── Helpers ───────────────────────────────────────────────────── //
 
   function removeRow(bindingId) {
+    // Remove desktop table row
     const row = document.querySelector(`tr[data-binding-id="${bindingId}"]`);
-    if (!row) return;
+    if (row) row.remove();
 
+    // Remove mobile card (T16-04)
+    const card = document.querySelector(`.actor-card[data-binding-id="${bindingId}"]`);
+    if (card) card.remove();
+
+    // Show empty state in table if no rows remain
     const tbody = document.getElementById('actors-tbody');
-    row.remove();
-
-    if (tbody && tbody.querySelectorAll('tr').length === 0) {
+    if (tbody && tbody.querySelectorAll('tr[data-binding-id]').length === 0) {
       tbody.innerHTML =
         '<tr><td colspan="5" class="data-table__empty">No pending bindings.</td></tr>';
+    }
+
+    // Show empty state in card list if no cards remain (T16-04)
+    const cardsList = document.getElementById('actors-cards-list');
+    if (cardsList && cardsList.querySelectorAll('.actor-card').length === 0) {
+      cardsList.innerHTML =
+        '<p class="actors-cards-empty">No pending bindings.</p>';
     }
   }
 }
