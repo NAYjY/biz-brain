@@ -245,7 +245,7 @@ fn supply_request_row_html(
     let state_lower = sr.state.to_lowercase();
     let state_display = state_label(&sr.state, t);
     format!(
-        r#"<tr data-sr-id="{id}">
+        r#"<tr data-sr-id="{id}" data-state="{state_lower}">
   <td><span class="state-pill state-pill--{state_lower}">{state_display}</span></td>
   <td>{desc}</td>
   <td><div class="chip-list" id="orders-{id}"></div></td>

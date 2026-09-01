@@ -135,7 +135,12 @@ function stateClass(state) {
 /** Renders a <span class="state-pill state-pill--{cls}">{label}</span> */
 function statePill(state) {
   const cls = stateClass(state);
-  const label = state.replace(/_/g, ' ');
+  // Use the server-injected i18n map when available (covers Thai and future locales).
+  // Falls back to humanising the raw state string for any unlisted state.
+  const i18nKey = 'state.' + state.toLowerCase();
+  const label = (window.BB_I18N && window.BB_I18N[i18nKey])
+    ? window.BB_I18N[i18nKey]
+    : state.replace(/_/g, ' ');
   return `<span class="state-pill state-pill--${cls}">${escapeHtml(label)}</span>`;
 }
 

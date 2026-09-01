@@ -180,7 +180,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
       .map(id => `<a href="/branches/${branchId}/orders" class="chip" title="${id}">${BB.shortId(id)}</a>`)
       .join('');
     return `
-      <tr data-sr-id="${sr.id}">
+      <tr data-sr-id="${sr.id}" data-state="${sr.state}">
         <td>${pill}</td>
         <td>${BB.escapeHtml(sr.description)}</td>
         <td><div class="chip-list">${chips}</div></td>
@@ -198,7 +198,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     const hasChips = (sr.order_ids ?? []).length > 0;
 
     return `
-      <div class="sr-card" data-sr-id="${sr.id}">
+      <div class="sr-card" data-sr-id="${sr.id}" data-state="${sr.state}">
         <div class="sr-card__header">
           ${pill}
         </div>
@@ -223,8 +223,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     const srId      = container.dataset.srId;
     // Find state from closest table row OR card
     const parent    = container.closest('tr[data-sr-id], .sr-card[data-sr-id]');
-    const statePill = parent?.querySelector('.state-pill');
-    const state     = statePill?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
+    const state = parent?.dataset.state ?? '';
     container.innerHTML = '';
 
     if (state === 'DRAFT') {

@@ -552,8 +552,7 @@ function initOrdersPage(branchId, initialCursor) {
 
     // Resolve state from table row OR mobile card (T16-02)
     const container        = document.querySelector(`tr[data-order-id="${orderId}"], .order-card[data-order-id="${orderId}"]`);
-    const stateEl          = container?.querySelector('.state-pill');
-    const state            = stateEl?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
+    const state    = container?.dataset.state ?? '';
     const currentShortName = container?.dataset.shortName ?? '';
 
     const done       = state === 'DONE';
