@@ -1,6 +1,9 @@
 //! D03/D07/T11/T21: shared HTML shell fragments used by all SSR page handlers.
 //! T11: all chrome strings now go through `&Translations` — never hardcoded.
 //! T21: topbar_html gains a Settings nav item (Owner-only).
+//! T16-mobile: topbar restructured for 2-row grid on mobile:
+//!   Row 1: wordmark | branch switcher | actions
+//!   Row 2: nav tabs (scrollable, full width)
 
 use axum::response::{Html, IntoResponse, Response};
 use axum::http::HeaderMap;
@@ -92,8 +95,6 @@ pub fn topbar_html(
 
 /// Variant used by pages where we know the caller's role.
 /// Pass `is_owner = false` to hide the Settings nav item for Managers.
-/// Most callers use `topbar_html` which defaults to showing Settings;
-/// the settings page itself is protected server-side regardless.
 pub fn topbar_html_for_role(
     branch_id: Uuid,
     branch_name: &str,
@@ -126,6 +127,8 @@ fn topbar_html_inner(
         )
     };
 
+    // Branch switcher: dropdown when multiple branches, plain label when only one.
+    // This element sits in the topbar grid between wordmark and actions (Row 1 on mobile).
     let switcher_html = if all_branches.len() <= 1 {
         format!(
             r#"<span class="branch-switcher__name">{}</span>"#,
@@ -162,6 +165,7 @@ fn topbar_html_inner(
         String::new()
     };
 
+    // Locale switcher — visible on desktop in the actions bar; hidden on mobile via CSS.
     let locale_switcher = locale_switcher_html(t.locale, current_path);
 
     format!(
@@ -188,9 +192,11 @@ fn topbar_html_inner(
 </header>
 
 <style>
+/* ── Branch switcher ── */
 .branch-switcher {{
   display: flex;
   align-items: center;
+  min-width: 0;
 }}
 .branch-switcher__select {{
   background: var(--color-surface-2);
@@ -203,6 +209,9 @@ fn topbar_html_inner(
   padding: var(--space-1) var(--space-3);
   cursor: pointer;
   transition: border-color .15s;
+  /* Issue 4: never overflow its container */
+  max-width: 200px;
+  min-width: 0;
 }}
 .branch-switcher__select:focus {{
   outline: none;
@@ -213,17 +222,22 @@ fn topbar_html_inner(
   font-weight: 500;
   color: var(--color-text-muted);
   padding: var(--space-1) var(--space-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }}
 </style>
+
 <script>
-        // T16-09: scroll active nav link into view on mobile load
-        (function () {{
-          var active = document.querySelector('.topbar__nav a.active');
-          if (active) {{
-            active.scrollIntoView({{ inline: 'center', block: 'nearest' }});
-          }}
-        }})();
-      </script>"#,
+  // T16-09: scroll active nav link into view on mobile load
+  (function () {{
+    var active = document.querySelector('.topbar__nav a.active');
+    if (active) {{
+      active.scrollIntoView({{ inline: 'center', block: 'nearest' }});
+    }}
+  }})();
+</script>"#,
         switcher_html = switcher_html,
         locale_switcher = locale_switcher,
         orders        = nav_item("/orders",          t.get("nav.orders"),           "orders"),
