@@ -1,60 +1,179 @@
-# Biz-Brain — clean-slate implementation
+# Biz·Brain
 
-Rebuilt from scratch against the ticket resolutions in `map.md`/`T01`-`T07`/
-`R01`-`R03`, after the prior (Qwen-generated) implementation was found to
-contradict several locked decisions and not compile. T04 and T07 were still
-open when this build started — see "T04 and T07 resolutions" below; they
-were resolved first, then implemented alongside everything else.
+**AI-powered operations hub for small business owners** — manage orders, workers, and suppliers through LINE, WhatsApp, and Telegram, with a real-time owner dashboard.
 
-**Not verified with `cargo check`** — no Rust toolchain was available in the
-sandbox this was built in. Review before trusting; see "Known risk areas"
-below for where to look first.
+---
 
-## Crate map
+## What it does
 
-| Crate       | Ticket(s)   | Contents |
-|-------------|-------------|----------|
-| `domain`    | T01         | Newtype ids, `Order`/`SupplyRequest`/`Assignment`/`Invoice` state machines, single closed `DomainEvent` enum, `Channel`/`ChannelIdentity` (T04), `SseSignal` (T07) |
-| `store`     | T02, T04    | Event tables (typed columns + CHECK, sequence-based optimistic concurrency), projection tables, `orders`/`supply_requests` metadata tables, `webhook_inbox` (T04 dedup), `workers`/`suppliers` identity tables |
-| `agent`     | T03         | Keyword pre-filter → Claude classify fallback, set-valued thread context, two-lane output (DomainEvent vs NL) |
-| `messaging` | T04         | `ChannelAdapter` trait, LINE + WhatsApp adapters, inbound dedup-and-land flow |
-| `api`       | T05, T04, T07 | REST reads, one command endpoint per Owner-triggerable `DomainEvent` variant, webhook routes, per-Branch SSE source |
-| `web`       | T06, T07    | Leptos SSR shell, browser-facing SSE relay |
-| `server`    | T06         | The actual binary — composes `api` + `web` into one `Router`, one process |
+Biz·Brain sits between your owner dashboard and your field workers / suppliers. Workers accept, update, and complete jobs by chatting with a bot on LINE or Telegram. Suppliers send invoices via WhatsApp. The AI classifies every incoming message and fires the right domain event — no app installs, no training required for your team.
 
-## T04 and T07 resolutions (made in this pass, not pre-existing tickets)
+```
+Worker (LINE/Telegram) ──▶ AI Classifier ──▶ Order state machine
+                                               │
+Owner Dashboard (web) ◀── SSE live updates ◀──┘
+Supplier (WhatsApp)   ──▶ AI Classifier ──▶ Invoice / Supply Request flow
+```
 
-**T04** — `line` renamed to `messaging`; one crate, shared `Channel` trait,
-per-channel submodules. Inbound handoff is async via a durable
-`webhook_inbox` table (dedup + ack-fast). Reply tokens are used *only* for a
-synchronous in-handler ack; all Agent/Owner-triggered content goes through
-push. `domain` owns the `Channel`/`external_id` shape on Worker/Supplier;
-`messaging`/`store` own the lookup.
+---
 
-**T07** — SSE payload is a bare invalidation signal (not a raw `DomainEvent`
-or diff), fired off the projection worker's write so a client re-fetch is
-guaranteed consistent. One connection per Branch. No `Last-Event-ID` replay
-— reconnect just triggers a normal REST re-fetch. `web` re-originates its
-own SSE endpoint for the browser; `api`'s stream stays same-process.
+## Key features
 
-## A gap caught during the build
+**For owners**
+- Real-time order board with SSE push (no page refresh)
+- Assign, reassign, force-state, cancel, reset, and close orders from the dashboard
+- Message workers directly from the thread modal
+- Follow-up alerts (one-time, hourly, daily, every-3-day) with push to worker
+- Start/due dates with overdue highlighting
+- Short job names (≤20 chars) workers can reference by text
+- Per-branch AI provider toggle: Claude or Gemini
+- Multi-role auth: Owners see all branches; Managers see only granted branches
+- Cursor-based paginated order list with state/worker/search filters
 
-Order/SupplyRequest *creation* isn't in T01's `DomainEvent` enum (the Owner
-creates them directly; the Agent never originates them) — so `orders` and
-`supply_requests` metadata tables exist in `store` outside the event
-streams. `api`'s create-order/create-supply-request commands write there
-directly and seed the projection row immediately.
+**For workers** (no app needed)
+- Receive orders over LINE or Telegram
+- Reply in Thai or English — the AI understands both
+- `รับงาน` → accept · `ไม่ว่าง` → unavailable · `เสร็จ` → done
+- Multi-order disambiguation via yes/no flow when holding multiple jobs
 
-## Known risk areas (check these first)
+**For suppliers** (no app needed)
+- Receive supply requests over WhatsApp
+- Reply with invoice (text or image); image bytes stored and surfaced to owner
+- Confirm delivery after owner approves
 
-- **Leptos 0.6 API surface** (`web/src/routes/dashboard.rs`) — kept
-  deliberately minimal (a static shell); the exact `leptos::ssr::render_to_string`
-  call signature should be checked against whatever Leptos version actually
-  resolves.
-- **`agent`'s `active_orders_for_worker` query** (`store/src/actors.rs`) is
-  an approximation (latest worker-bearing event per Order) — a real
-  `assignments` read model would be more correct; flagged as a follow-up.
-- **`InvoiceReceived` detail extraction** — `SupplierAgent` recognizes the
-  keyword but doesn't extract line-items/totals from the message; that's
-  out of scope for T03's classification step as resolved.
-- Nothing here has been compiled. Run `cargo check --workspace` first.
+---
+
+## Architecture
+
+```
+Cargo workspace
+├── domain/        Pure types, state machines, domain events (no I/O)
+├── store/         Postgres event log + projections (sqlx)
+├── agent/         AI classify clients: Claude + Gemini; prefilter; thread context
+├── messaging/     LINE / WhatsApp / Telegram adapters + webhook ingestion
+├── api/           Axum REST + SSE + background workers
+├── web/           SSR dashboard (Axum + inline HTML; no JS framework)
+└── server/        Single binary entry point
+```
+
+**Event sourcing** — `order_events` and `supply_request_events` are append-only streams. A projection worker maintains `order_current_state` and `supply_request_current_state` read models. The dashboard reads projections; never the event stream.
+
+**State machines** — `Order` and `SupplyRequest` enforce valid transitions at the domain level. Owner force-state commands bypass normal messaging flows for operational overrides.
+
+**AI pipeline**
+1. Cheap keyword prefilter (regex) for unambiguous patterns
+2. Claude Sonnet 4.6 (or Gemini) with conversation history + active order context
+3. 8 s timeout · 3 attempts · 500 ms / 1500 ms backoff
+4. Retries exhausted → `ClarificationRequested` (owner is alerted)
+5. Low-confidence flag surfaced on dashboard for owner review
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Language | Rust (2021 edition) |
+| Web framework | Axum 0.7 |
+| Database | PostgreSQL 16 (via sqlx 0.7) |
+| Migrations | sqlx migrate (30+ migrations) |
+| AI | Claude Sonnet 4.6 · Gemini 3.5 Flash Lite |
+| Messaging | LINE Messaging API · WhatsApp Cloud API · Telegram Bot API |
+| Auth | JWT in httpOnly cookie · bcrypt passwords · token versioning |
+| Frontend | Server-side rendered HTML · Vanilla JS · CSS custom properties |
+| Real-time | Server-Sent Events (per-branch broadcast channel) |
+| Deploy | Single binary · Railway (PORT env var) |
+
+---
+
+## Getting started
+
+### Prerequisites
+
+- Rust (stable)
+- PostgreSQL 16
+- Docker (optional, for local Postgres)
+
+### 1. Start Postgres
+
+```bash
+docker compose up -d
+```
+
+### 2. Configure environment
+
+```bash
+cp .env.example .env
+# Fill in: DATABASE_URL, JWT_SECRET, ANTHROPIC_API_KEY
+# LINE / WhatsApp / Telegram keys needed for messaging
+```
+
+### 3. Seed the database
+
+```bash
+cargo run --bin seed -- admin@example.com password "Main Branch"
+```
+
+### 4. Run the server
+
+```bash
+cargo run --bin biz-brain-server
+```
+
+Open `http://localhost:8080` and sign in with the credentials from step 3.
+
+---
+
+## Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `DATABASE_URL` | ✅ | Postgres connection string |
+| `JWT_SECRET` | ✅ | HS256 signing secret (use `openssl rand -hex 32`) |
+| `ANTHROPIC_API_KEY` | ✅ | Claude API key |
+| `LINE_CHANNEL_SECRET` | LINE | LINE channel secret |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE | LINE channel access token |
+| `WHATSAPP_VERIFY_TOKEN` | WhatsApp | Webhook verification token |
+| `WHATSAPP_ACCESS_TOKEN` | WhatsApp | Graph API access token |
+| `WHATSAPP_PHONE_NUMBER_ID` | WhatsApp | Phone number ID |
+| `TELEGRAM_SECRET_TOKEN` | Telegram | Webhook secret header |
+| `TELEGRAM_BOT_TOKEN` | Telegram | Bot token |
+| `TELEGRAM_WEBHOOK_URL` | optional | Auto-registers webhook on startup |
+| `GEMINI_API_KEY` | optional | Required if any branch uses Gemini |
+| `PORT` | optional | Default: 8080 |
+| `STATIC_DIR` | optional | Default: `web/static` |
+
+---
+
+## Worker onboarding
+
+1. Add a worker in the dashboard (name only)
+2. Tell the worker to send any message to your LINE bot
+3. The message appears as a pending binding on the **Workers & Suppliers** page
+4. Confirm the binding to link their LINE account to the worker profile
+5. Assign them an order — they receive a push notification immediately
+
+Supplier onboarding follows the same flow over WhatsApp.
+
+---
+
+## Database migrations
+
+Migrations live in `store/migrations/` and run automatically on startup via `sqlx::migrate!`. The sequence covers event tables, projection tables, actor directory, webhook inbox, invoices, follow-up alerts, and multi-role auth.
+
+---
+
+## Localization
+
+The dashboard supports **English** and **Thai** (ภาษาไทย). Locale is resolved from:
+1. `locale` cookie (set via the language switcher)
+2. `Accept-Language` header
+3. Default: English
+
+The AI classifier also understands mixed Thai/English worker messages natively.
+
+---
+
+## License
+
+MIT
