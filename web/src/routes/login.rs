@@ -1,4 +1,6 @@
-//! D01 / T20 / T11 / T13: Owner/Manager login.
+//! D01 / T20 / T11 / T13 / T08: Owner/Manager login.
+//! T08: Login rate limiting — 5 attempts / 15 min per IP, checked before
+//!      any DB work so a brute-force attacker doesn't burn DB connections.
 //! T11: login page rendered in the locale detected from Accept-Language header.
 //!      No cookie exists yet so browser language is the only signal.
 
@@ -67,13 +69,40 @@ pub async fn handle_login(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    // T08: raw request parts so we can extract the client IP before any work.
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<LoginForm>,
 ) -> Response {
     let t = locale_from_request(&jar, &headers);
+
+    // T08: rate-limit check — keyed on IP, 5 attempts / 15 min.
+    // We manually derive the IP because axum's Form extractor consumes the
+    // body, so we use ConnectInfo for the peer addr and check X-Forwarded-For
+    // from the headers map.
+    let ip = extract_ip_from_headers(&headers)
+        .unwrap_or_else(|| peer.ip());
+
+    if let Err(not_until) = state.login_limiter.check_key(&ip) {
+        use governor::clock::{Clock, DefaultClock};
+        let clock = DefaultClock::default();
+        let wait_secs = not_until
+            .wait_time_from(clock.now())
+            .as_secs()
+            .max(1);
+        let msg = format!("Too many login attempts. Please wait {wait_secs}s and try again.");
+        return (StatusCode::TOO_MANY_REQUESTS, login_page_html(&t, Some(&msg))).into_response();
+    }
+
     match authenticate(&state, &form).await {
         Ok((jar, redirect)) => (jar, redirect).into_response(),
         Err(msg) => (StatusCode::UNAUTHORIZED, login_page_html(&t, Some(&msg))).into_response(),
     }
+}
+
+/// Extract leftmost IP from X-Forwarded-For, or None if not present / unparseable.
+fn extract_ip_from_headers(headers: &HeaderMap) -> Option<std::net::IpAddr> {
+    let xff = headers.get("x-forwarded-for")?.to_str().ok()?;
+    xff.split(',').next()?.trim().parse().ok()
 }
 
 async fn authenticate(
@@ -143,7 +172,6 @@ fn issue_jwt_cookie(
 }
 
 fn login_page_html(t: &Translations, error: Option<&str>) -> Html<String> {
-    // Map the sentinel "invalid" to the translated string
     let error_msg = error.map(|e| {
         if e == "invalid" { t.get("login.error.invalid") } else { e }
     });

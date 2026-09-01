@@ -1,17 +1,24 @@
-//! T05 / P04 / P16 / T20 / T13 / T21: REST endpoints, webhooks, SSE.
+//! T05 / P04 / P16 / T20 / T13 / T21 / T08: REST endpoints, webhooks, SSE.
+//! T08: `GovernorLayer` applied to login and webhook routes.
 //! T10: supplier routes added.
 //! T13: /api/v1/account/change-password added.
 //! T21: rename_branch (PATCH /branches/:id) and lookup_manager (GET /managers?email=) added.
 
 use axum::{
+    middleware,
     routing::{delete, get, patch, post},
     Router,
 };
+use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
-use crate::{routes, security_headers, state::AppState};
+use crate::{rate_limit, routes, security_headers, state::AppState};
 
 pub fn build_router() -> Router<AppState> {
+    // ── Rate limiters (created once, shared via Arc) ───────────────── //
+    let login_lim   = rate_limit::login_limiter();
+    let webhook_lim = rate_limit::webhook_limiter();
+
     let branch_routes = Router::new()
         // Orders
         .route("/orders", get(routes::orders::list_orders).post(routes::orders::create_order))
@@ -106,13 +113,19 @@ pub fn build_router() -> Router<AppState> {
         // T13: account settings (any authenticated user)
         .route("/account/change-password", post(routes::account::change_password));
 
+    // T08: webhook routes get their own sub-router so we can attach the
+    // webhook rate-limit middleware without affecting api_v1 routes.
+    let webhook_lim_clone = Arc::clone(&webhook_lim);
     let webhooks = Router::new()
         .route("/webhooks/line", post(routes::webhooks::line_webhook))
         .route(
             "/webhooks/whatsapp",
             get(routes::webhooks::whatsapp_verify).post(routes::webhooks::whatsapp_webhook),
         )
-        .route("/webhooks/telegram", post(routes::webhooks::telegram_webhook));
+        .route("/webhooks/telegram", post(routes::webhooks::telegram_webhook))
+        .layer(middleware::from_fn(move |req, next| {
+            rate_limit::rate_limit_layer(Arc::clone(&webhook_lim_clone), req, next)
+        }));
 
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::exact(
@@ -134,4 +147,10 @@ pub fn build_router() -> Router<AppState> {
         .layer(security_headers::x_content_type_options_layer())
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+}
+
+/// Expose the login limiter so `web::routes::login` can share it via AppState extension.
+/// Called once from `server/src/main.rs` during setup.
+pub fn login_rate_limiter() -> Arc<rate_limit::KeyedLimiter> {
+    rate_limit::login_limiter()
 }

@@ -28,3 +28,5 @@ time = "0.3"
 uuid.workspace = true
 chrono.workspace = true
 sqlx.workspace = true
+# T08: rate limiting
+governor.workspace = true

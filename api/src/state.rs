@@ -4,6 +4,10 @@
 //! `Arc<dyn ClassifyClient>`. `classifier_for_branch()` reads the branch's
 //! `ai_provider` column and returns the right one.
 //!
+//! T08: `login_limiter` added to AppState so `web::routes::login` can apply
+//! the rate limiter without a global. Constructed once in `server/src/main.rs`
+//! via `api::login_rate_limiter()` and stored here.
+//!
 //! `WorkerAgent` and `SupplierAgent` are constructed per-classify-call inside
 //! inbox_worker (cheap — they hold only an Arc) rather than stored on AppState,
 //! so provider switching takes effect immediately without a restart.
@@ -24,6 +28,8 @@ use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 
 use axum::extract::FromRef;
+
+use crate::rate_limit::KeyedLimiter;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -46,6 +52,9 @@ pub struct AppState {
     pub threads: Arc<Mutex<agent::ThreadContextStore>>,
     /// T07: one broadcast channel per Branch, lazily created.
     pub sse_branches: Arc<Mutex<HashMap<Uuid, broadcast::Sender<SseSignal>>>>,
+    /// T08: shared login rate limiter — 5 req / 15 min per IP.
+    /// Used by `web::routes::login::handle_login` via middleware.
+    pub login_limiter: Arc<KeyedLimiter>,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -62,6 +71,7 @@ impl AppState {
         telegram: TelegramAdapter,
         claude_api_key: impl Into<String>,
         gemini_api_key: impl Into<String>,
+        login_limiter: Arc<KeyedLimiter>,
     ) -> Self {
         let claude_api_key = claude_api_key.into();
         let gemini_api_key = gemini_api_key.into();
@@ -83,6 +93,7 @@ impl AppState {
             gemini_classifier: Arc::new(GeminiClassifier::new(gemini_api_key)),
             threads: Arc::new(Mutex::new(agent::ThreadContextStore::new())),
             sse_branches: Arc::new(Mutex::new(HashMap::new())),
+            login_limiter,
             pool,
         }
     }

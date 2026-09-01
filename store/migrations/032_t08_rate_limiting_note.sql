@@ -1,0 +1,21 @@
+-- T08: Rate limiting — no schema changes required.
+--
+-- Rate limiting is implemented entirely in-process via the `governor` crate
+-- (see api/src/rate_limit.rs). All bucket state is held in memory
+-- (DashMap-backed keyed governor), which is sufficient for the single-process
+-- deployment model (T06).
+--
+-- Policy applied:
+--   POST /login             — 5 requests / 15 min per source IP
+--   POST /webhooks/line     — 200 requests / min per source IP
+--   POST /webhooks/whatsapp — 200 requests / min per source IP
+--   POST /webhooks/telegram — 200 requests / min per source IP
+--   GET  /webhooks/whatsapp — 200 requests / min per source IP (handshake)
+--   /api/v1/*               — no rate limit (JWT-gated; revisit at multi-tenant scale)
+--
+-- IP extraction order:
+--   1. Leftmost value in X-Forwarded-For header (set by Railway proxy)
+--   2. Direct peer address from ConnectInfo<SocketAddr> (local dev)
+--
+-- On breach: HTTP 429 with Retry-After: <seconds> header.
+-- State resets on process restart; acceptable for the single-tenant use case.
