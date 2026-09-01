@@ -1,8 +1,10 @@
 /**
- * D05 / P05 / T09: Supply Requests page — client-side logic.
+ * D05 / P05 / T09 / T16-03: Supply Requests page — client-side logic.
  * T09: list is now paginated ({ items, next_cursor }).
  *      State filter dropdown + infinite scroll.
  * P05: Approve-Invoice modal shows inline media (image/PDF) when available.
+ * T16-03: Mobile card layout — srCardHtml() mirrors srRowHtml().
+ *         appendRows() and refreshList() target both #sr-tbody and #sr-cards-list.
  */
 
 function initSupplyRequestsPage(branchId, initialCursor) {
@@ -10,7 +12,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
 
   let pendingApproveSupplyRequestId = null;
 
-  // ── T09: Pagination state ─────────────────────────────────────────── //
+  // ── T09: Pagination state ─────────────────────────────────────── //
 
   let nextCursor = initialCursor ?? null;
   let isLoading  = false;
@@ -30,7 +32,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     return params.toString();
   }
 
-  // ── IntersectionObserver ──────────────────────────────────────────── //
+  // ── IntersectionObserver ──────────────────────────────────────── //
 
   const sentinel = document.getElementById('sr-scroll-sentinel');
   const statusEl = document.getElementById('sr-load-status');
@@ -72,20 +74,40 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     }
   }
 
+  // ── T16-03: appendRows targets both table and card list ───────── //
+
   function appendRows(srs) {
-    const tbody = document.getElementById('sr-tbody');
-    if (!tbody) return;
-    const emptyRow = tbody.querySelector('td[colspan]');
-    if (emptyRow) emptyRow.closest('tr')?.remove();
-    for (const sr of srs) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = srRowHtml(sr);
-      tbody.appendChild(tr);
+    const tbody     = document.getElementById('sr-tbody');
+    const cardsList = document.getElementById('sr-cards-list');
+
+    // Remove empty-state placeholders
+    if (tbody) {
+      const emptyRow = tbody.querySelector('td[colspan]');
+      if (emptyRow) emptyRow.closest('tr')?.remove();
     }
+    if (cardsList) {
+      const emptyCard = cardsList.querySelector('.sr-cards-empty');
+      if (emptyCard) emptyCard.remove();
+    }
+
+    for (const sr of srs) {
+      if (tbody) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = srRowHtml(sr);
+        tbody.appendChild(tr);
+      }
+      if (cardsList) {
+        const div = document.createElement('div');
+        div.innerHTML = srCardHtml(sr);
+        const card = div.firstElementChild;
+        if (card) cardsList.appendChild(card);
+      }
+    }
+
     attachRowActions();
   }
 
-  // ── Filter bar ────────────────────────────────────────────────────── //
+  // ── Filter bar ────────────────────────────────────────────────── //
 
   document.getElementById('sr-filter-state')?.addEventListener('change', () => {
     nextCursor = null;
@@ -93,7 +115,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     refreshList();
   });
 
-  // ── SSE wiring ───────────────────────────────────────────────────── //
+  // ── SSE wiring ───────────────────────────────────────────────── //
 
   new BranchEventSource(branchId)
     .withBadge(document.getElementById('live-badge'))
@@ -107,7 +129,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
   loadInFlightOrders();
   attachRowActions();
 
-  // ── List refresh (page 1) ─────────────────────────────────────────── //
+  // ── List refresh (page 1) ─────────────────────────────────────── //
 
   async function refreshList() {
     isLoading = true;
@@ -123,14 +145,24 @@ function initSupplyRequestsPage(branchId, initialCursor) {
       return;
     }
 
-    const tbody = document.getElementById('sr-tbody');
-    if (!tbody) { isLoading = false; return; }
+    const tbody     = document.getElementById('sr-tbody');
+    const cardsList = document.getElementById('sr-cards-list');
 
     if (data.items.length === 0) {
-      tbody.innerHTML =
-        '<tr><td colspan="4" class="data-table__empty">No supply requests yet.</td></tr>';
+      if (tbody) {
+        tbody.innerHTML =
+          '<tr><td colspan="4" class="data-table__empty">No supply requests yet.</td></tr>';
+      }
+      if (cardsList) {
+        cardsList.innerHTML = '<p class="sr-cards-empty">No supply requests yet.</p>';
+      }
     } else {
-      tbody.innerHTML = data.items.map(srRowHtml).join('');
+      if (tbody) {
+        tbody.innerHTML = data.items.map(srRowHtml).join('');
+      }
+      if (cardsList) {
+        cardsList.innerHTML = data.items.map(srCardHtml).join('');
+      }
     }
 
     attachRowActions();
@@ -140,7 +172,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     isLoading = false;
   }
 
-  // ── Row HTML ──────────────────────────────────────────────────────── //
+  // ── Row HTML (desktop table) ──────────────────────────────────── //
 
   function srRowHtml(sr) {
     const pill = BB.statePill(sr.state);
@@ -156,15 +188,43 @@ function initSupplyRequestsPage(branchId, initialCursor) {
       </tr>`;
   }
 
+  // ── T16-03: Card HTML (mobile) ────────────────────────────────── //
+
+  function srCardHtml(sr) {
+    const pill = BB.statePill(sr.state);
+    const chips = (sr.order_ids ?? [])
+      .map(id => `<a href="/branches/${branchId}/orders" class="chip" title="${id}">${BB.shortId(id)}</a>`)
+      .join('');
+    const hasChips = (sr.order_ids ?? []).length > 0;
+
+    return `
+      <div class="sr-card" data-sr-id="${sr.id}">
+        <div class="sr-card__header">
+          ${pill}
+        </div>
+        <div class="sr-card__desc">${BB.escapeHtml(sr.description)}</div>
+        ${hasChips ? `
+        <div class="sr-card__divider"></div>
+        <div class="sr-card__orders">
+          <span class="sr-card__orders-label">Orders</span>
+          <div class="chip-list">${chips}</div>
+        </div>` : ''}
+        <div class="sr-card__actions sr-actions" data-sr-id="${sr.id}"></div>
+      </div>`;
+  }
+
+  // ── Row / card actions (shared logic) ────────────────────────── //
+
   function attachRowActions() {
     document.querySelectorAll('.sr-actions').forEach(renderActions);
   }
 
   function renderActions(container) {
-    const srId     = container.dataset.srId;
-    const row      = container.closest('tr');
-    const statePill = row?.querySelector('.state-pill');
-    const state    = statePill?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
+    const srId      = container.dataset.srId;
+    // Find state from closest table row OR card
+    const parent    = container.closest('tr[data-sr-id], .sr-card[data-sr-id]');
+    const statePill = parent?.querySelector('.state-pill');
+    const state     = statePill?.textContent?.trim().toUpperCase().replace(/ /g, '_') ?? '';
     container.innerHTML = '';
 
     if (state === 'DRAFT') {
@@ -184,7 +244,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     }
   }
 
-  // ── Send supply request ───────────────────────────────────────────── //
+  // ── Send supply request ───────────────────────────────────────── //
 
   async function sendSupplyRequest(srId) {
     const ok = await BB.confirm('Send to Supplier via WhatsApp?');
@@ -198,7 +258,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     }
   }
 
-  // ── Create Supply Request ─────────────────────────────────────────── //
+  // ── Create Supply Request ─────────────────────────────────────── //
 
   document.getElementById('create-sr-btn').addEventListener('click', async () => {
     const desc = document.getElementById('sr-description').value.trim();
@@ -223,7 +283,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     }
   });
 
-  // ── Approve Invoice (P05: with media preview) ─────────────────────── //
+  // ── Approve Invoice (P05: with media preview) ─────────────────── //
 
   async function openApproveInvoice(srId) {
     pendingApproveSupplyRequestId = srId;
@@ -275,7 +335,7 @@ function initSupplyRequestsPage(branchId, initialCursor) {
     }
   });
 
-  // ── Data loaders ─────────────────────────────────────────────────── //
+  // ── Data loaders ─────────────────────────────────────────────── //
 
   async function loadInFlightOrders() {
     try {

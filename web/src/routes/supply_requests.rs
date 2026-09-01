@@ -1,4 +1,4 @@
-//! D05 / T09 / T11: Supply Requests view — SSR shell, fully translated.
+//! D05 / T09 / T11 / T16-03: Supply Requests view — SSR shell, fully translated.
 
 use axum::{
     extract::{Path, State},
@@ -48,17 +48,30 @@ pub async fn render_supply_requests(
         .map(|c| format!(r#""{}""#, c.encode()))
         .unwrap_or_else(|| "null".to_string());
 
-    let rows_html = if supply_requests.is_empty() {
-        format!(
-            r#"<tr><td colspan="4" class="data-table__empty">{}</td></tr>"#,
-            t.get("supply.empty")
+    let (rows_html, cards_html) = if supply_requests.is_empty() {
+        (
+            format!(
+                r#"<tr><td colspan="4" class="data-table__empty">{}</td></tr>"#,
+                t.get("supply.empty")
+            ),
+            format!(
+                r#"<p class="sr-cards-empty">{}</p>"#,
+                t.get("supply.empty")
+            ),
         )
     } else {
-        supply_requests
-            .iter()
-            .map(|sr| supply_request_row_html(sr, &t))
-            .collect::<Vec<_>>()
-            .join("\n")
+        (
+            supply_requests
+                .iter()
+                .map(|sr| supply_request_row_html(sr, &t))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            supply_requests
+                .iter()
+                .map(|sr| supply_request_card_html(sr, branch_id, &t))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     };
 
     // i18n strings for JS layer
@@ -109,7 +122,8 @@ pub async fn render_supply_requests(
     </div>
   </div>
 
-  <div class="card">
+  <!-- Desktop table (hidden on mobile via base.css) -->
+  <div class="card desktop-only">
     <table class="data-table" id="sr-table">
       <thead>
         <tr>
@@ -126,6 +140,10 @@ pub async fn render_supply_requests(
          text-align:center;padding:var(--space-4);
          font-size:var(--text-sm);color:var(--color-text-muted);display:none;"></div>
   </div>
+
+  <!-- Mobile card list (T16-03, hidden on desktop via mobile-cards.css) -->
+  <div id="sr-cards-list">{cards_html}</div>
+
 </div>
 
 <!-- Create Supply Request modal -->
@@ -199,6 +217,7 @@ pub async fn render_supply_requests(
         col_orders         = t.get("supply.col.orders"),
         col_actions        = t.get("supply.col.actions"),
         rows_html          = rows_html,
+        cards_html         = cards_html,
         create_title       = t.get("supply.create.title"),
         create_desc_label  = t.get("supply.create.description"),
         create_desc_ph     = t.get("supply.create.description_ph"),
@@ -224,14 +243,7 @@ fn supply_request_row_html(
     t: &crate::i18n::Translations,
 ) -> String {
     let state_lower = sr.state.to_lowercase();
-    let state_display = match sr.state.as_str() {
-        "DRAFT"                  => t.get("state.draft"),
-        "SENT"                   => t.get("state.sent"),
-        "INVOICE_RECEIVED"       => t.get("state.invoice_received"),
-        "OWNER_APPROVED_INVOICE" => t.get("state.owner_approved_invoice"),
-        "SUPPLIER_CONFIRMED"     => t.get("state.supplier_confirmed"),
-        other                    => other,
-    };
+    let state_display = state_label(&sr.state, t);
     format!(
         r#"<tr data-sr-id="{id}">
   <td><span class="state-pill state-pill--{state_lower}">{state_display}</span></td>
@@ -244,4 +256,42 @@ fn supply_request_row_html(
         state_display = state_display,
         desc          = html_escape(&sr.description),
     )
+}
+
+/// T16-03: Mobile card — mirrors supply_request_row_html() structure.
+/// Order ID chips are left empty (no chip data on SrPageRow); JS attachRowActions()
+/// hydrates the .sr-actions div on the client exactly as it does for table rows.
+fn supply_request_card_html(
+    sr: &store::projection_tables_paginated::SrPageRow,
+    branch_id: Uuid,
+    t: &crate::i18n::Translations,
+) -> String {
+    let state_lower   = sr.state.to_lowercase();
+    let state_display = state_label(&sr.state, t);
+
+    format!(
+        r#"<div class="sr-card" data-sr-id="{id}">
+  <div class="sr-card__header">
+    <span class="state-pill state-pill--{state_lower}">{state_display}</span>
+  </div>
+  <div class="sr-card__desc">{desc}</div>
+  <div class="sr-card__actions sr-actions" data-sr-id="{id}"></div>
+</div>"#,
+        id            = sr.id,
+        state_lower   = state_lower,
+        state_display = state_display,
+        desc          = html_escape(&sr.description),
+    )
+}
+
+/// Shared i18n state label lookup.
+fn state_label(state: &str, t: &crate::i18n::Translations) -> String {
+    match state {
+        "DRAFT"                  => t.get("state.draft").to_string(),
+        "SENT"                   => t.get("state.sent").to_string(),
+        "INVOICE_RECEIVED"       => t.get("state.invoice_received").to_string(),
+        "OWNER_APPROVED_INVOICE" => t.get("state.owner_approved_invoice").to_string(),
+        "SUPPLIER_CONFIRMED"     => t.get("state.supplier_confirmed").to_string(),
+        other                    => other.to_string(),
+    }
 }

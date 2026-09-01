@@ -106,3 +106,95 @@
   color: var(--color-text-muted);
   font-size: var(--text-sm);
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   T16-03: Supply Requests card layout (mobile)
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── SR card list container ──────────────────────────────────────── */
+
+#sr-cards-list {
+  display: none; /* hidden on desktop */
+}
+
+@media (max-width: 768px) {
+  #sr-cards-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: 0;
+  }
+}
+
+/* ── Individual SR card ──────────────────────────────────────────── */
+
+.sr-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ── Card header: state pill ─────────────────────────────────────── */
+
+.sr-card__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ── Description ─────────────────────────────────────────────────── */
+
+.sr-card__desc {
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* ── Divider ─────────────────────────────────────────────────────── */
+
+.sr-card__divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: var(--space-1) 0;
+}
+
+/* ── Orders section ──────────────────────────────────────────────── */
+
+.sr-card__orders {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sr-card__orders-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ── Action buttons ──────────────────────────────────────────────── */
+
+.sr-card__actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: var(--space-1);
+}
+
+/* ── Empty-state ─────────────────────────────────────────────────── */
+
+.sr-cards-empty {
+  padding: var(--space-10);
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
