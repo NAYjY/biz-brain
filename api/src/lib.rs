@@ -11,6 +11,7 @@ pub mod app;
 pub mod event_handler;
 pub mod extractors;
 pub mod inbox_worker;
+pub mod inbox_worker_harness;
 pub mod rate_limit;    // T08
 pub mod routes;
 pub mod security_headers;

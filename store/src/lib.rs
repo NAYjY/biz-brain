@@ -22,7 +22,11 @@ pub use branch_config::BranchConfigRepository;
 pub use actor_directory::{ActorDirectory, PendingBinding};
 pub use alerts::{AlertMode, AlertRepository, AlertView};  // F05
 pub use conversation_history::{ConversationHistoryRepository, HistoryRow};
-pub use disambiguation::DisambiguationStore;
+pub use disambiguation::{
+        DisambiguationRow,
+        DisambiguationStore,
+        DisambiguationUpdate,
+    };
 pub use event_sourcing::{AppendError, EventSourcing};
 pub use order_events::OrderEventRepository;
 pub use projection_tables::ProjectionTables;

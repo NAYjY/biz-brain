@@ -49,6 +49,7 @@ pub struct AppState {
     /// Both classifiers pre-built; chosen per-branch at classify time.
     pub claude_classifier: Arc<dyn ClassifyClient>,
     pub gemini_classifier: Arc<dyn ClassifyClient>,
+    pub gemini_api_key: String,
     pub threads: Arc<Mutex<agent::ThreadContextStore>>,
     /// T07: one broadcast channel per Branch, lazily created.
     pub sse_branches: Arc<Mutex<HashMap<Uuid, broadcast::Sender<SseSignal>>>>,
@@ -90,7 +91,8 @@ impl AppState {
             whatsapp: Arc::new(whatsapp),
             telegram: Arc::new(telegram),
             claude_classifier: Arc::new(ClaudeClassifier::new(claude_api_key)),
-            gemini_classifier: Arc::new(GeminiClassifier::new(gemini_api_key)),
+            gemini_classifier: Arc::new(GeminiClassifier::new(gemini_api_key.clone())),
+            gemini_api_key,
             threads: Arc::new(Mutex::new(agent::ThreadContextStore::new())),
             sse_branches: Arc::new(Mutex::new(HashMap::new())),
             login_limiter,

@@ -7,13 +7,20 @@
 #![warn(clippy::all)]
 
 pub mod classify;
+pub mod harness; 
 pub mod outcome;
 pub mod prefilter;
 pub mod provider;
 pub mod thread_context;
 
 pub use classify::{ActiveOrderContext, ClaudeClassifier, GeminiClassifier, HistoryMessage};
-pub use outcome::{InterpretationError, InterpretationOutcome, OwnerAlert};
+pub use harness::{                     
+        GeminiHarness,
+        OrderContext,
+        HistoryTurn,
+        DisambiguationContext,
+    };
+pub use outcome::{HarnessOutput, InterpretationError, InterpretationOutcome, OwnerAlert};
 pub use provider::{AiProvider, ClassifyClient};
 pub use thread_context::ThreadContextStore;
 

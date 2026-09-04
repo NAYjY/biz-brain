@@ -3,15 +3,19 @@
 //! T01: `WorkerAgent` and `SupplierAgent` are constructed per-message using
 //! `state.classifier_for_branch(branch_id)`, which returns either the Claude
 //! or Gemini classifier depending on the branch's `ai_provider` column.
-//! Construction is O(1) — just an Arc clone — so there's no performance cost.
+//!
+//! HARNESS ADDITION: Worker path now branches on ai_provider:
+//!   "gemini" → inbox_worker_harness::process_with_harness()
+//!              Full Gemini harness: rich disambiguation, AI-drafted replies,
+//!              note extraction, escalation after 3 turns, ⚠️ badge on owner dashboard.
+//!   "claude" → original classify path (unchanged, preserved below)
+//!
+//! Supplier path (WhatsApp) — completely unchanged.
 //!
 //! Worker path (LINE / Telegram):
 //!   1. Resolve actor — fail-closed (register pending on unknown)
 //!   2. Fetch branch_id from workers table
-//!   3. Load active orders + write conversation_history (P13)
-//!   4. Check disambiguation_pending FIRST — active yes/no flow takes priority
-//!   5. Otherwise: classify with branch's AI provider (variant + order_id)
-//!   6. Clear → apply event; Ambiguous → start P02 yes/no flow
+//!   3. Branch on ai_provider → harness or classify
 //!
 //! Supplier path (WhatsApp):
 //!   1. Resolve actor
@@ -38,7 +42,7 @@ use store::conversation_history::ConversationHistoryRepository;
 use store::disambiguation::DisambiguationStore;
 use store::reply_templates::ReplyTemplateRepository;
 
-use crate::{event_handler, state::AppState};
+use crate::{event_handler, inbox_worker_harness, state::AppState};
 
 fn to_history_msg(row: store::HistoryRow) -> agent::HistoryMessage {
     agent::HistoryMessage { role: row.role, content: row.content }
@@ -122,7 +126,7 @@ async fn process_worker_message(
         return Ok(());
     };
 
-    // T01: fetch branch_id so we can select the right AI classifier.
+    // 2. Fetch branch_id.
     let branch_id: uuid::Uuid = sqlx::query_scalar(
         "SELECT branch_id FROM workers WHERE id = $1",
     )
@@ -130,7 +134,20 @@ async fn process_worker_message(
     .fetch_one(&state.pool)
     .await?;
 
-    // T01: build the agent for this branch's configured provider.
+    // 3. Branch on ai_provider.
+    //    Gemini → full harness (rich disambiguation, AI-drafted replies, escalation).
+    //    Claude → original classify path (unchanged below).
+    let provider = state.branch_config.ai_provider(branch_id).await;
+
+    if provider == "gemini" {
+        return inbox_worker_harness::process_with_harness(
+            state, sender, worker_id, branch_id, text,
+        )
+        .await;
+    }
+
+    // ── Claude classify path (original, unchanged) ────────────────────────── //
+
     let classifier = state.classifier_for_branch(branch_id).await;
     let worker_agent = WorkerAgent::new(classifier);
 
@@ -181,12 +198,8 @@ async fn process_worker_message(
         }
         Err(e) => {
             tracing::error!(owner_alert = true, "Worker classify error: {e}");
-            // T01: retries exhausted — fall through to ClarificationRequested.
             if let Some(oid) = active_order_ids.first().copied() {
-                let event = DomainEvent::ClarificationRequested {
-                    worker_id,
-                    order_id: oid,
-                };
+                let event = DomainEvent::ClarificationRequested { worker_id, order_id: oid };
                 send_to_sender(state, sender,
                     "I couldn't process your message. The Owner has been alerted and will follow up.").await;
                 append_order_event(state, event, oid).await?;
@@ -216,7 +229,6 @@ async fn process_worker_message(
                     let _ = state.projections.update_worker_message(oid, text).await;
                     let _ = state.projections.increment_unread(oid).await;
 
-                    // F04: flag low confidence when AI (not prefilter) resolved the order.
                     if !prefilter_hit && resolved_order_id.is_some() {
                         let _ = state.projections.flag_low_confidence(oid).await;
                     }
@@ -271,24 +283,14 @@ async fn handle_worker_disambiguation_reply(
 
     // Not an order name — check yes/no.
     if !is_affirmative(reply_text) && !is_negative(reply_text) {
-        // Don't delete — keep the pending flow alive and ask again.
         send_to_sender(state, sender,
             "Please reply Yes or No, or type the order name.").await;
         return Ok(());
     }
 
     if is_negative(reply_text) {
-        disambig_store.advance(sender_key).await?;
-        if let Some(row) = disambig_store.find(sender_key).await? {
-            if let Some(next_id) = row.current_candidate() {
-                let (short_name, desc) = order_display_fields(state, next_id).await?;
-                let name = display_name(short_name.as_deref(), &desc);
-                let q = format!("Is this about **{name}**? (Yes / No)");
-                send_to_sender(state, sender, &q).await;
-                return Ok(());
-            }
-        }
-        // All candidates exhausted → ClarificationRequested on first.
+        // Claude path: advance sequential index (old behaviour preserved)
+        // For new Gemini branches this code path is never reached.
         disambig_store.delete(sender_key).await?;
         if let Some(&oid) = candidates.first() {
             let event = DomainEvent::ClarificationRequested {
@@ -302,10 +304,13 @@ async fn handle_worker_disambiguation_reply(
         return Ok(());
     }
 
-    // Affirmative.
-    let confirmed_id = match pending.current_candidate() {
+    // Affirmative — use narrowed_to or first candidate.
+    let confirmed_id = match pending.narrowed_to {
         Some(id) => OrderId::new(id),
-        None => { disambig_store.delete(sender_key).await?; return Ok(()); }
+        None => match candidates.first() {
+            Some(&id) => OrderId::new(id),
+            None => { disambig_store.delete(sender_key).await?; return Ok(()); }
+        },
     };
     disambig_store.delete(sender_key).await?;
     resolve_and_apply_worker_event(
@@ -329,7 +334,6 @@ async fn resolve_and_apply_worker_event(
     let history: Vec<agent::HistoryMessage> =
         history_rows.into_iter().map(to_history_msg).collect();
 
-    // Fetch real state instead of hardcoding "confirmed".
     let real_state: Option<(String,)> = sqlx::query_as(
         "SELECT state FROM order_current_state WHERE order_id = $1",
     )
@@ -379,17 +383,23 @@ async fn start_worker_disambiguation(
     disambig_store: &DisambiguationStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let candidate_ids: Vec<uuid::Uuid> = candidates.iter().map(|id| id.into_inner()).collect();
-    disambig_store.create(sender_key, original_text, &candidate_ids, "order").await?;
 
-    let first = candidates.first().copied().unwrap();
-    let (short_name, desc) = order_display_fields(state, first.into_inner()).await?;
-    let name = display_name(short_name.as_deref(), &desc);
-    let question = format!("Is this about **{name}**? (Yes / No)");
-    send_to_sender(state, sender, &question).await;
+    // Claude path: create disambiguation with no original_intent
+    disambig_store.create(sender_key, original_text, &candidate_ids, "order", None).await?;
+
+    // Build numbered question using all candidates at once (not sequential yes/no)
+    let mut lines = vec!["งานที่หมายถึงคืองานไหนครับ?".to_string()];
+    for (i, &cid) in candidate_ids.iter().enumerate() {
+        let (short_name, desc) = order_display_fields(state, cid).await
+            .unwrap_or((None, cid.to_string()));
+        let name = display_name(short_name.as_deref(), &desc);
+        lines.push(format!("{}. {}", i + 1, name));
+    }
+    send_to_sender(state, sender, &lines.join("\n")).await;
     Ok(())
 }
 
-// ── Supplier path ────────────────────────────────────────────────────────── //
+// ── Supplier path (unchanged) ─────────────────────────────────────────────── //
 
 async fn process_supplier_message(
     state: &AppState,
@@ -485,7 +495,7 @@ async fn handle_invoice_received(
         SupplyRequestResolved::Single(id) => id,
         SupplyRequestResolved::NeedsDisambiguation(candidates) => {
             let ids: Vec<uuid::Uuid> = candidates.iter().map(|id| id.into_inner()).collect();
-            disambig_store.create(sender_key, "invoice", &ids, "supply_request").await?;
+            disambig_store.create(sender_key, "invoice", &ids, "supply_request", None).await?;
             let desc = supply_request_description(state, candidates[0].into_inner()).await?;
             let q = format!("Is this invoice for **{desc}**? (Yes / No)");
             send_to_sender(state, sender, &q).await;
@@ -523,7 +533,7 @@ async fn handle_supplier_confirmed(
         SupplyRequestResolved::Single(id) => id,
         SupplyRequestResolved::NeedsDisambiguation(candidates) => {
             let ids: Vec<uuid::Uuid> = candidates.iter().map(|id| id.into_inner()).collect();
-            disambig_store.create(sender_key, "supplier_confirmed", &ids, "supply_request").await?;
+            disambig_store.create(sender_key, "supplier_confirmed", &ids, "supply_request", None).await?;
             let desc = supply_request_description(state, candidates[0].into_inner()).await?;
             let q = format!("Is this confirmation for **{desc}**? (Yes / No)");
             send_to_sender(state, sender, &q).await;
@@ -555,15 +565,6 @@ async fn handle_supplier_disambiguation_reply(
     disambig_store: &DisambiguationStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if is_negative(reply_text) {
-        disambig_store.advance(sender_key).await?;
-        if let Some(row) = disambig_store.find(sender_key).await? {
-            if let Some(next_id) = row.current_candidate() {
-                let desc = supply_request_description(state, next_id).await?;
-                let q = format!("Is this for **{desc}**? (Yes / No)");
-                send_to_sender(state, sender, &q).await;
-                return Ok(());
-            }
-        }
         disambig_store.delete(sender_key).await?;
         send_to_sender(state, sender,
             "I couldn't match your message. The Owner has been alerted.").await;
@@ -574,9 +575,14 @@ async fn handle_supplier_disambiguation_reply(
         return Ok(());
     }
 
-    let confirmed_id = match pending.current_candidate() {
+    // Affirmative — use narrowed_to or first candidate.
+    let candidates = pending.candidates();
+    let confirmed_id = match pending.narrowed_to {
         Some(id) => SupplyRequestId::new(id),
-        None => { disambig_store.delete(sender_key).await?; return Ok(()); }
+        None => match candidates.first() {
+            Some(&id) => SupplyRequestId::new(id),
+            None => { disambig_store.delete(sender_key).await?; return Ok(()); }
+        },
     };
     disambig_store.delete(sender_key).await?;
     let branch_id = branch_for_supply_request(state, confirmed_id.into_inner()).await?;
@@ -596,7 +602,7 @@ async fn handle_supplier_disambiguation_reply(
     Ok(())
 }
 
-// ── Resolution helpers ───────────────────────────────────────────────────── //
+// ── Resolution helpers ────────────────────────────────────────────────────── //
 
 enum ResolvedOrder {
     Single(OrderId),
@@ -663,7 +669,7 @@ fn is_negative(text: &str) -> bool {
     )
 }
 
-// ── Send helpers ─────────────────────────────────────────────────────────── //
+// ── Send helpers ──────────────────────────────────────────────────────────── //
 
 async fn send_to_sender(state: &AppState, sender: &ChannelIdentity, text: &str) {
     let result = match sender.channel {
@@ -705,7 +711,7 @@ async fn fetch_reply_template(state: &AppState, order_id: OrderId, event: &Domai
     format!("Done ✓ ({})", event_type)
 }
 
-// ── DB helpers ───────────────────────────────────────────────────────────── //
+// ── DB helpers ────────────────────────────────────────────────────────────── //
 
 async fn order_display_fields(
     state: &AppState,
@@ -741,7 +747,11 @@ async fn build_order_contexts(
 
         if let Some((st,)) = row {
             let (_, desc) = order_display_fields(state, oid.into_inner()).await?;
-            out.push(ActiveOrderContext { order_id: oid.into_inner(), description: desc, state: st });
+            out.push(ActiveOrderContext {
+                order_id: oid.into_inner(),
+                description: desc,
+                state: st,
+            });
         }
     }
     Ok(out)
@@ -771,7 +781,10 @@ async fn active_supply_request_contexts(
     }).collect())
 }
 
-async fn supply_request_description(state: &AppState, id: uuid::Uuid) -> Result<String, sqlx::Error> {
+async fn supply_request_description(
+    state: &AppState,
+    id: uuid::Uuid,
+) -> Result<String, sqlx::Error> {
     let (desc,): (String,) =
         sqlx::query_as("SELECT description FROM supply_requests WHERE id = $1")
             .bind(id)
@@ -780,7 +793,10 @@ async fn supply_request_description(state: &AppState, id: uuid::Uuid) -> Result<
     Ok(desc)
 }
 
-async fn branch_for_supply_request(state: &AppState, id: uuid::Uuid) -> Result<uuid::Uuid, sqlx::Error> {
+async fn branch_for_supply_request(
+    state: &AppState,
+    id: uuid::Uuid,
+) -> Result<uuid::Uuid, sqlx::Error> {
     let (bid,): (uuid::Uuid,) =
         sqlx::query_as("SELECT branch_id FROM supply_requests WHERE id = $1")
             .bind(id)
@@ -847,7 +863,7 @@ async fn create_invoice_and_fetch_media(
     Ok(invoice_id)
 }
 
-// ── Event append ─────────────────────────────────────────────────────────── //
+// ── Event append ──────────────────────────────────────────────────────────── //
 
 async fn append_order_event(
     state: &AppState,
