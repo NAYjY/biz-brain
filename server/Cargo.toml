@@ -17,7 +17,10 @@ axum.workspace = true
 api = { path = "../api" }
 web = { path = "../web" }
 messaging = { path = "../messaging" }
+store = { path = "../store" }     # needed for ReplyTemplateRepository in --seed-owner
 tower-http = { version = "0.5", features = ["trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 dotenvy = "0.15"
+bcrypt = "0.15"    # T05c: --seed-owner password hashing
+uuid = { version = "1", features = ["v4"] }

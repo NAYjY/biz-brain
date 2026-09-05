@@ -140,6 +140,8 @@ pub fn build_router() -> Router<AppState> {
         .allow_headers([axum::http::header::CONTENT_TYPE]);
 
     Router::new()
+        .route("/health", get(routes::health::health))
+        .route("/ready",  get(routes::health::ready))
         .nest("/api/v1", api_v1)
         .merge(webhooks)
         .layer(security_headers::csp_layer())

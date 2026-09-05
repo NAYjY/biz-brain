@@ -1992,13 +1992,16 @@ version = "0.1.0"
 dependencies = [
  "api",
  "axum",
+ "bcrypt",
  "dotenvy",
  "messaging",
  "sqlx",
+ "store",
  "tokio",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "web",
 ]
 
