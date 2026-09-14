@@ -99,8 +99,6 @@ impl GeminiHarness {
     }
 
     /// First message from worker — no disambiguation pending.
-    /// Tries to resolve using state/content/recency, or starts a
-    /// disambiguation flow with a natural numbered question.
     pub async fn harness_fresh(
         &self,
         worker_name: &str,
@@ -115,8 +113,6 @@ impl GeminiHarness {
     }
 
     /// Worker replied during an active disambiguation flow.
-    /// Acknowledges their reply, extracts notes, narrows or confirms,
-    /// or escalates after 3 turns.
     pub async fn harness_continuation(
         &self,
         worker_name: &str,
@@ -186,9 +182,10 @@ fn build_fresh_system(worker_name: &str, orders: &[OrderContext]) -> String {
         .enumerate()
         .map(|(i, o)| {
             format!(
-                "  {}. name=\"{}\" state=\"{}\" last_active=\"{}\" description=\"{}\"",
+                "  {}. name=\"{}\" id=\"{}\" state=\"{}\" last_active=\"{}\" description=\"{}\"",
                 i + 1,
                 o.display_name(),
+                o.order_id,
                 o.state,
                 o.last_event_at.as_deref().unwrap_or("unknown"),
                 o.description,
@@ -204,59 +201,74 @@ You are helpful, warm, and professional. Workers are busy — be concise.
 
 WORKER: {worker_name}
 
-ACTIVE ORDERS:
+ACTIVE ORDERS (each has a number, name, uuid, state, description):
 {order_list}
 
-=== RESOLUTION RULES (apply in order, stop when resolved) ===
+=== STATE FILTER — APPLY FIRST, MANDATORY ===
 
-RULE 1 — STATE FILTER:
-Remove orders where the detected event is impossible given state.
-  "เสร็จแล้ว / done / เรียบร้อย" → requires state: ACCEPTED or READY_FOR_PICKUP
-  "รับงาน / accept / โอเค" → requires state: ASSIGNED
-  "ไม่ว่าง / unavailable / can't" → requires state: ASSIGNED
-  "ยกเลิก / cancel" → requires state: ACCEPTED or ASSIGNED
-If only ONE order remains after filter → RESOLVED (set resolved=true).
+Match the worker's message to an event type, then remove orders where that event is impossible.
 
-RULE 2 — CONTENT MATCH:
-Look for specific keywords in the message that match order descriptions.
-Equipment: แอร์/AC/air → air conditioning orders
-Locations: ห้อง/ชั้น + number → match description with same room/floor
-Materials: ท่อ/สาย/น้ำ/ไฟ → match plumbing/electrical/water orders
-Strong content match → RESOLVED.
-Weak or ambiguous match → do NOT resolve, fall through.
+EVENT → VALID STATES:
+  order_done              → ACCEPTED or READY_FOR_PICKUP only
+  worker_accepted         → ASSIGNED only
+  worker_unavailable      → ASSIGNED only
+  worker_cancelled        → ACCEPTED or ASSIGNED only
+  worker_ready_for_pickup → ACCEPTED only
+  clarification_requested → ASSIGNED or ACCEPTED only
 
-RULE 3 — RECENCY (weak signal only):
-Note the most recently active order.
-Do NOT resolve on recency alone.
-Use only to inform the narrowed_to field if still ambiguous.
+After removing invalid-state orders:
+  - 0 remain → set resolved=false, event_variant=null, reply apologising you cannot match
+  - 1 remains → set resolved=true immediately with that order's uuid. DO NOT ASK.
+  - 2+ remain → proceed to content matching below
 
-RULE 4 — EXTRACTION (always, regardless of resolution):
+=== CONTENT MATCHING (only when 2+ remain after state filter) ===
+
+Look for keywords in the worker's message matching order descriptions.
+Equipment: แอร์/AC/air → air conditioning; ท่อ → pipe/plumbing; ไฟ → electrical/wiring; สี → paint
+Locations: ห้อง/ชั้น + number → match room/floor in description
+Strong unique match → resolved=true with that order's uuid.
+Ambiguous → proceed to ask.
+
+=== RECENCY (weak signal only) ===
+
+Note the most recently active order. Use only for narrowed_to, NOT to auto-resolve.
+
+=== NOTE EXTRACTION (always, regardless of resolution) ===
+
 Always extract secondary information from the message.
-Look for problems, complaints, materials used, observations.
-Trigger words: "แต่...", "อีกอย่าง...", "ลูกค้า...", "ของหมด...", "เสีย...", "แตก..."
+Problems, complaints, materials used, observations.
+Triggers: "แต่...", "อีกอย่าง...", "ลูกค้า...", "ของหมด...", "เสีย...", "แตก..."
 Extract as short Thai phrases.
 
-=== IF NOT RESOLVED ===
-Ask ONE natural Thai question listing ALL candidates as a numbered list.
-Include the order description in parentheses so worker recognises their job.
-Example: "งานที่เสร็จคืองานไหนครับ?\n1. AC-B3 (ซ่อม AC ห้อง 302)\n2. ท่อชั้น2 (เดินท่อ)\n3. งานสี (ทาสีห้อง)"
-NEVER ask yes/no. NEVER use UUIDs. NEVER mention "order ID".
+=== WHEN ASKING FOR DISAMBIGUATION ===
+
+List ONLY the remaining candidates after state filtering (not all active orders).
+Number them 1, 2, 3... starting from 1 with NO gaps.
+Use order display name + short description in parentheses.
+Example: "งานที่หมายถึงคืองานไหนครับ?\n1. AC-B3 (ซ่อม AC ห้อง 302)\n2. ท่อชั้น2 (เดินท่อ)"
+NEVER ask yes/no on first turn. NEVER use UUIDs. NEVER say "order ID".
 
 === REPLY RULES ===
-- reply is ALWAYS required — worker always gets a response.
-- If extracted_notes is non-empty: acknowledge the note FIRST, then ask about order.
-  Example: "รับทราบเรื่องน้ำยาหมดครับ ✓\nขอถามหน่อยนะครับ — งานที่เสร็จคืองานไหนครับ?..."
-- If resolved: confirm clearly what was recorded.
-  Example: "เยี่ยมเลยครับ ✓ บันทึกงาน AC-B3 เสร็จแล้ว"
-- Keep replies short — workers read on mobile while on the job.
+
+reply is ALWAYS required — worker always gets a response.
+If notes extracted: acknowledge the note FIRST, then handle order.
+  Example: "รับทราบเรื่องน้ำยาหมดครับ ✓\nขอถามหน่อยนะครับ — งานที่หมายถึงคืออะไรครับ?..."
+If resolved: confirm clearly.
+  Example: "เยี่ยมเลยครับ ✓ บันทึกงาน AC-B3 รับงานเรียบร้อยแล้ว"
+Keep replies short — workers read on mobile.
 
 === OUTPUT FORMAT ===
 Respond with VALID JSON ONLY. No markdown. No explanation outside the JSON.
 
+CRITICAL RULES FOR JSON OUTPUT:
+- When resolved=true: order_id MUST be a uuid string (never null), event_variant MUST be a string (never null)
+- When resolved=false: order_id and event_variant should be null
+- event_variant MUST be one of the exact strings listed below — pick the one matching the detected event type
+
 {{
   "resolved": <bool>,
-  "order_id": "<uuid string or null>",
-  "event_variant": "<one of: order_done, worker_accepted, worker_unavailable, worker_cancelled, clarification_requested, worker_ready_for_pickup, or null>",
+  "order_id": "<uuid string matching one of the order ids above — REQUIRED when resolved=true>",
+  "event_variant": "<REQUIRED when resolved=true: exactly one of: order_done, worker_accepted, worker_unavailable, worker_cancelled, clarification_requested, worker_ready_for_pickup>",
   "reply": "<Thai message to send to worker>",
   "extracted_notes": ["<Thai note>", ...],
   "owner_alert": null or {{"urgent": <bool>, "message": "<English summary for owner>"}},
@@ -316,7 +328,15 @@ fn build_continuation_system(worker_name: &str, ctx: &DisambiguationContext) -> 
         .as_deref()
         .unwrap_or("unknown");
 
-    // Escalation instruction changes at turn 3
+    // Build candidate uuid mapping string for easy reference
+    let uuid_map = ctx
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(i, o)| format!("  {} -> id={}", i + 1, o.order_id))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     let escalation_rule = if ctx.turns_elapsed >= 3 {
         r#"ESCALATION: turns_elapsed has reached 3.
 Set escalate_to_owner=true.
@@ -334,11 +354,14 @@ Set owner_escalation_summary with all accumulated notes and candidate names."#
 Worker has not yet declared which order they are referring to.
 
 WORKER: {worker_name}
-ORIGINAL MESSAGE (turn 1): "{}"
+ORIGINAL MESSAGE (turn 1): (stored internally)
 ORIGINAL INTENT DETECTED: {original_intent}
 
-CANDIDATES (worker must declare one of these):
+CANDIDATES (worker must pick one):
 {candidate_list}
+
+CANDIDATE NUMBER → UUID MAPPING:
+{uuid_map}
 
 CURRENT STATE:
   turns_elapsed: {}
@@ -347,35 +370,52 @@ CURRENT STATE:
 {notes_so_far}
   last question asked: "{last_q}"
 
+=== CRITICAL NUMBER PARSING RULE ===
+
+When worker sends a single digit or number, it selects a candidate by position number.
+"1" = candidate 1 (first in list above)
+"2" = candidate 2 (second in list above)
+"3" = candidate 3 (third in list above)
+ONLY look at the worker's CURRENT message. IGNORE all numbers from previous bot messages.
+If worker says "1", order_id MUST be the uuid of candidate 1.
+If worker says "2", order_id MUST be the uuid of candidate 2.
+A number from worker = RESOLVED immediately. Set resolved=true.
+
 === RULES FOR THIS TURN ===
 
-1. ACKNOWLEDGE first — always respond to what they just said naturally.
-   Even if they ignored the question, acknowledge any new content.
+1. ACKNOWLEDGE first — respond naturally to what they said.
 
 2. EXTRACT new operational notes from their message.
-   Add to new_notes_extracted (these will be appended to the running buffer).
 
-3. TRY TO RESOLVE using their reply:
-   Direct answer: "2", "อันแรก", "AC-B3", order name → RESOLVED, set resolved=true
-   Indirect clue: "อันที่ทำเมื่อเช้า", "งาน AC" → narrow + confirm, set narrowed_to
-   Unrelated update: extract notes, ask again with different phrasing
+3. CHECK FOR DIRECT SELECTION:
+   - Worker says a number (1, 2, 3...) → RESOLVED with that candidate's uuid
+   - Worker says the order name or display name → RESOLVED with that order's uuid
+   - Worker says ใช่/yes/correct when narrowed_to is set → RESOLVED with narrowed_to uuid
+   - Worker says ไม่/no → NOT that order, remove it from candidates in your thinking
 
-4. IF narrowed_to is already set (from previous turn):
+4. CHECK FOR INDIRECT CLUE (only if no direct selection):
+   - Partial name, description keyword, location → narrow to one candidate
+   - Set narrowed_to to that uuid, ask confirmation for ONLY that order
+
+5. IF narrowed_to already set from previous turn:
    Ask confirmation for THAT specific order only.
-   Example: "AC-B3 ใช่ไหมครับ? (ตอบ ใช่ หรือ ไม่ใช่ ได้เลย)"
+   Example: "AC-B3 ใช่ไหมครับ? (ตอบ ใช่ หรือ ไม่ใช่)"
 
-5. REPHRASE — never repeat the exact same question as last_question.
-   Vary the structure, not just the wording.
+6. REPHRASE — never repeat the exact wording of last_question.
 
-6. {escalation_rule}
+7. {escalation_rule}
 
 === OUTPUT FORMAT ===
 Respond with VALID JSON ONLY. No markdown. No explanation outside the JSON.
 
+CRITICAL RULES FOR JSON OUTPUT:
+- When resolved=true: order_id MUST be the uuid from the CANDIDATE NUMBER → UUID MAPPING (never null), event_variant MUST match original_intent (never null)
+- event_variant when resolved = same as original_intent (e.g. if original_intent is "worker_accepted" then event_variant = "worker_accepted")
+
 {{
   "resolved": <bool>,
-  "order_id": "<uuid or null — must be one of the candidate UUIDs if resolved>",
-  "event_variant": "<original_intent variant or null>",
+  "order_id": "<uuid from CANDIDATE NUMBER → UUID MAPPING — REQUIRED when resolved=true, null otherwise>",
+  "event_variant": "<REQUIRED when resolved=true: use original_intent value, e.g. worker_accepted, order_done, etc. null when not resolved>",
   "reply": "<Thai message to send to worker>",
   "new_notes_extracted": ["<Thai note>", ...],
   "narrowed_to": "<uuid or null>",
@@ -384,10 +424,6 @@ Respond with VALID JSON ONLY. No markdown. No explanation outside the JSON.
   "owner_escalation_summary": "<English summary of all notes + unresolved candidates, or null>",
   "confidence": <float 0.0-1.0>
 }}"#,
-        ctx.candidates
-            .first()
-            .map(|_| "")
-            .unwrap_or(""),
         ctx.turns_elapsed,
     )
 }
@@ -402,10 +438,10 @@ fn build_contents(system: &str, history: &[HistoryTurn], message: &str) -> Value
     }));
     contents.push(json!({
         "role": "model",
-        "parts": [{ "text": "Understood. I will follow these rules and respond with valid JSON only." }]
+        "parts": [{ "text": "Understood. I will follow these rules exactly and respond with valid JSON only." }]
     }));
 
-    // Last 10 history turns
+    // Last 10 history turns — label clearly to avoid number confusion
     let start = history.len().saturating_sub(10);
     for turn in &history[start..] {
         let role = if turn.role == "assistant" { "model" } else { "user" };
@@ -415,10 +451,10 @@ fn build_contents(system: &str, history: &[HistoryTurn], message: &str) -> Value
         }));
     }
 
-    // Current message
+    // Current message — mark explicitly
     contents.push(json!({
         "role": "user",
-        "parts": [{ "text": message }]
+        "parts": [{ "text": format!("[CURRENT MESSAGE TO CLASSIFY]: {}", message) }]
     }));
 
     json!(contents)
@@ -508,16 +544,28 @@ fn parse_fresh_output(raw: &Value) -> Result<HarnessOutput, InterpretationError>
         ));
     }
 
+    // Build owner_alert: prefer Gemini's explicit alert, then synthesise from
+    // extracted_notes when resolved (so owner sees notes in thread/log).
+    let owner_alert = j.owner_alert
+        .map(|a| OwnerAlert { urgent: a.urgent, message: a.message })
+        .or_else(|| {
+            if j.resolved && !j.extracted_notes.is_empty() {
+                Some(OwnerAlert {
+                    urgent: false,
+                    message: format!("Worker notes: {}", j.extracted_notes.join(" | ")),
+                })
+            } else {
+                None
+            }
+        });
+
     Ok(HarnessOutput {
         resolved: j.resolved,
         order_id: j.order_id.as_deref().and_then(|s| s.parse().ok()),
         event_variant: j.event_variant.as_deref().and_then(parse_variant),
         reply: j.reply,
         extracted_notes: j.extracted_notes,
-        owner_alert: j.owner_alert.map(|a| OwnerAlert {
-            urgent: a.urgent,
-            message: a.message,
-        }),
+        owner_alert,
         needs_disambiguation: j.needs_disambiguation,
         narrowed_to: j.narrowed_to.as_deref().and_then(|s| s.parse().ok()),
         disambiguation_question: j.disambiguation_question,
@@ -544,7 +592,7 @@ fn parse_continuation_output(
         ));
     }
 
-    // If resolved, use the original_intent as the event variant
+    // If resolved, use event_variant from JSON or fall back to original_intent
     let event_variant = if j.resolved {
         j.event_variant
             .as_deref()
@@ -558,7 +606,7 @@ fn parse_continuation_output(
         None
     };
 
-    // Build owner alert for escalation — includes all accumulated notes
+    // Build owner alert for escalation
     let owner_alert = if j.escalate_to_owner {
         let all_notes: Vec<String> = ctx
             .extracted_notes_so_far
@@ -591,7 +639,6 @@ fn parse_continuation_output(
             message: summary,
         })
     } else if j.resolved && !j.new_notes_extracted.is_empty() {
-        // Resolution with notes — flush to owner
         let all_notes: Vec<String> = ctx
             .extracted_notes_so_far
             .iter()
@@ -619,14 +666,14 @@ fn parse_continuation_output(
         owner_alert,
         needs_disambiguation: !j.resolved && !j.escalate_to_owner,
         narrowed_to: j.narrowed_to.as_deref().and_then(|s| s.parse().ok()),
-        disambiguation_question: None, // continuation doesn't store this separately
+        disambiguation_question: None,
         escalate_to_owner: j.escalate_to_owner,
-        owner_escalation_summary: None, // already folded into owner_alert above
+        owner_escalation_summary: None,
         confidence: j.confidence.clamp(0.0, 1.0),
     })
 }
 
-// ── Retry loop (same policy as existing classify.rs) ─────────────────────── //
+// ── Retry loop ────────────────────────────────────────────────────────────── //
 
 async fn with_retry<F, Fut>(mut make_request: F) -> Result<Value, InterpretationError>
 where

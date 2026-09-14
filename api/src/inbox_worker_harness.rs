@@ -9,7 +9,7 @@
 //!      → if not: harness_fresh()
 //!   2. Route HarnessOutput:
 //!      → reply: send to worker immediately (always, before anything else)
-//!      → event: emit if resolved
+//!      → event: emit if resolved AND both order_id + event_variant present
 //!      → notes: accumulate in disambiguation state or flush to owner alert
 //!      → escalate: set ⚠️ badge on order row
 //!      → resolved: delete disambiguation_pending, flush all notes
@@ -24,13 +24,10 @@ use agent::harness::{DisambiguationContext, GeminiHarness, HistoryTurn, OrderCon
 use agent::outcome::HarnessOutput;
 
 use crate::event_handler;
-use crate::inbox_worker::display_name;
 use crate::state::AppState;
 
 // ── Main entry point ──────────────────────────────────────────────────────── //
 
-/// Process one inbound worker message through the Gemini harness.
-/// Returns Ok(()) when done — all side effects (send, emit, update) handled internally.
 pub async fn process_with_harness(
     state: &AppState,
     sender: &ChannelIdentity,
@@ -79,7 +76,6 @@ pub async fn process_with_harness(
             Ok(out) => out,
             Err(e) => {
                 tracing::error!("harness_continuation failed: {e}");
-                // Fallback: acknowledge and keep waiting
                 HarnessOutput {
                     resolved: false,
                     order_id: None,
@@ -144,64 +140,115 @@ pub async fn process_with_harness(
 
     // ── Route the HarnessOutput ───────────────────────────────────────────── //
 
-    // 1. Send reply immediately — always first
+    // 1. Send reply immediately — always first, before any event emission
     send_to_worker(state, sender, &sender_key, &history_repo, &output.reply).await;
 
-    // 2. If resolved — emit event, flush notes, clean up disambiguation
+    // If harness resolved cleanly on a fresh turn (no prior pending row),
+    // make sure any stale old disambiguation row is wiped so it can't interfere.
+    if output.resolved && pending.is_none() {
+        let _ = disambig_store.delete(&sender_key).await;
+    }
+
+    // 2. If resolved — emit event. If event_variant is None, infer from order state.
     if output.resolved {
-        if let (Some(order_id), Some(variant)) = (output.order_id, output.event_variant) {
-            let oid = OrderId::new(order_id);
-
-            // Build and emit the domain event
-            let event = build_worker_event(variant, worker_id, oid);
-
-            // Remove from ThreadContextStore if terminal
-            if event.is_terminal_for_worker() {
-                let mut threads = state.threads.lock().await;
-                threads.remove_active_order(sender, oid);
+        // Resolve variant: use Gemini's answer, or infer from order state in DB.
+        let resolved_variant = match output.event_variant {
+            Some(v) => Some(v),
+            None => {
+                if let Some(oid) = output.order_id {
+                    infer_variant_from_state(state, oid).await
+                } else {
+                    None
+                }
             }
+        };
 
-            // Update projection with worker message
-            let _ = state.projections.update_worker_message(oid, text).await;
-            let _ = state.projections.increment_unread(oid).await;
+        match (output.order_id, resolved_variant) {
+            (Some(order_id), Some(variant)) => {
+                let oid = OrderId::new(order_id);
 
-            // Flag low confidence if needed
-            if output.should_flag_low_confidence() {
-                let _ = state.projections.flag_low_confidence(oid).await;
+                let event = build_worker_event(variant, worker_id, oid);
+
+                // Remove from ThreadContextStore if terminal
+                if event.is_terminal_for_worker() {
+                    let mut threads = state.threads.lock().await;
+                    threads.remove_active_order(sender, oid);
+                }
+
+                // Update projection with worker message
+                let _ = state.projections.update_worker_message(oid, text).await;
+                let _ = state.projections.increment_unread(oid).await;
+
+                // Emit domain event — updates projection + fires SSE
+                if let Err(e) = append_order_event(state, event, oid).await {
+                    tracing::error!("append_order_event failed for order {oid}: {e}");
+                }
+
+                // Flag low confidence AFTER projection upsert so it isn't overwritten,
+                // then fire a second SSE so dashboard picks up the badge.
+                if output.should_flag_low_confidence() {
+                    let _ = state.projections.flag_low_confidence(oid).await;
+                }
+
+                // Surface owner alert if any — log always, badge for all alerts
+                if let Some(alert) = &output.owner_alert {
+                    tracing::info!(
+                        order_id = %order_id,
+                        urgent = alert.urgent,
+                        "owner alert: {}",
+                        alert.message
+                    );
+                    let flag_result = state.projections.flag_low_confidence(oid).await;
+                    tracing::info!(
+                        order_id = %order_id,
+                        flag_ok = flag_result.is_ok(),
+                        "flag_low_confidence called after append"
+                    );
+                    // Fire SSE after flagging so dashboard re-fetches with badge set
+                    let branch_id_for_sse: Option<uuid::Uuid> = sqlx::query_scalar(
+                        "SELECT branch_id FROM orders WHERE id = $1",
+                    )
+                    .bind(order_id)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(bid) = branch_id_for_sse {
+                        state.publish_sse(domain::SseSignal::OrderChanged {
+                            order_id: oid,
+                            branch_id: domain::BranchId::new(bid),
+                        }).await;
+                    }
+                }
+
+                // Clean up disambiguation state
+                if let Err(e) = disambig_store.delete(&sender_key).await {
+                    tracing::warn!("failed to delete disambiguation state: {e}");
+                }
             }
-
-            // Surface owner alert if any (notes + escalation summary)
-            if let Some(alert) = &output.owner_alert {
-                tracing::info!(
-                    order_id = %order_id,
-                    urgent = alert.urgent,
-                    "owner alert: {}",
-                    alert.message
+            (order_id, event_variant) => {
+                // resolved=true but missing order_id or event_variant — harness bug
+                // Don't delete disambiguation; let worker retry
+                tracing::warn!(
+                    sender = %sender.external_id,
+                    order_id = ?order_id,
+                    event_variant = ?event_variant,
+                    "Harness returned resolved=true but incomplete output — no event emitted"
                 );
-                // Flag ⚠️ on dashboard so owner knows to check thread
-                let _ = state.projections.flag_low_confidence(oid).await;
             }
-
-            // Emit event
-            append_order_event(state, event, oid).await?;
-
-            // Clean up disambiguation
-            disambig_store.delete(&sender_key).await?;
         }
         return Ok(());
     }
 
-    // 3. Escalation — owner ⚠️ badge, stop asking worker
+    // 3. Escalation — set ⚠️ badge, stop asking worker
     if output.escalate_to_owner {
-        // Find most likely order for the badge — use narrowed_to or first candidate
         let target_order_id = output.narrowed_to
-            .or_else(|| pending.as_ref()?.candidates().first().copied());
+            .or_else(|| pending.as_ref().and_then(|r| r.candidates().first().copied()));
 
         if let Some(oid) = target_order_id {
             let _ = state.projections.flag_low_confidence(OrderId::new(oid)).await;
             let _ = state.projections.increment_unread(OrderId::new(oid)).await;
 
-            // SSE to push ⚠️ badge to dashboard immediately
             let branch_id_typed: Option<Uuid> = sqlx::query_scalar(
                 "SELECT branch_id FROM orders WHERE id = $1",
             )
@@ -219,29 +266,32 @@ pub async fn process_with_harness(
             }
         }
 
-        // Update disambiguation state with escalation
-        disambig_store.update(&sender_key, DisambiguationUpdate {
+        if let Err(e) = disambig_store.update(&sender_key, DisambiguationUpdate {
             new_notes: output.extracted_notes.clone(),
             narrowed_to: output.narrowed_to,
             last_question: None,
             escalate: true,
-        }).await?;
+        }).await {
+            tracing::warn!("failed to update disambiguation for escalation: {e}");
+        }
 
         return Ok(());
     }
 
-    // 4. Needs disambiguation — create or update the pending state
+    // 4. Needs disambiguation — create or update pending state
     if output.needs_disambiguation {
-        if let Some(ref row) = pending {
+        if pending.is_some() {
             // Update existing state
-            disambig_store.update(&sender_key, DisambiguationUpdate {
+            if let Err(e) = disambig_store.update(&sender_key, DisambiguationUpdate {
                 new_notes: output.extracted_notes.clone(),
                 narrowed_to: output.narrowed_to,
                 last_question: output.disambiguation_question.clone(),
                 escalate: false,
-            }).await?;
+            }).await {
+                tracing::warn!("failed to update disambiguation state: {e}");
+            }
         } else {
-            // Fresh disambiguation — determine candidates and original intent
+            // Fresh disambiguation flow
             let active_order_ids = state.actors.active_orders_for_worker(worker_id).await?;
             let candidate_uuids: Vec<Uuid> = active_order_ids
                 .iter()
@@ -250,22 +300,26 @@ pub async fn process_with_harness(
 
             let intent_str = output.event_variant.map(|v| v.as_sql().to_string());
 
-            disambig_store.create(
+            if let Err(e) = disambig_store.create(
                 &sender_key,
                 text,
                 &candidate_uuids,
                 "order",
                 intent_str.as_deref(),
-            ).await?;
+            ).await {
+                tracing::warn!("failed to create disambiguation state: {e}");
+            }
 
-            // If notes were extracted on turn 1, update immediately
-            if !output.extracted_notes.is_empty() {
-                disambig_store.update(&sender_key, DisambiguationUpdate {
+            // If notes extracted on turn 1, persist them immediately
+            if !output.extracted_notes.is_empty() || output.narrowed_to.is_some() {
+                if let Err(e) = disambig_store.update(&sender_key, DisambiguationUpdate {
                     new_notes: output.extracted_notes.clone(),
                     narrowed_to: output.narrowed_to,
                     last_question: output.disambiguation_question.clone(),
                     escalate: false,
-                }).await?;
+                }).await {
+                    tracing::warn!("failed to update disambiguation with initial notes: {e}");
+                }
             }
         }
     }
@@ -354,8 +408,58 @@ fn build_worker_event(
         ClarificationRequested => DomainEvent::ClarificationRequested { worker_id, order_id },
         WorkerReadyForPickup   => DomainEvent::WorkerReadyForPickup { worker_id, order_id },
         OrderDone              => DomainEvent::OrderDone { order_id },
-        _ => DomainEvent::ClarificationRequested { worker_id, order_id },
+        // Fallback for any unexpected variant — open clarification so owner can see
+        _ => {
+            tracing::warn!("unexpected variant {:?} in build_worker_event, using ClarificationRequested", variant);
+            DomainEvent::ClarificationRequested { worker_id, order_id }
+        }
     }
+}
+
+/// When Gemini resolves an order but omits event_variant, infer the most
+/// likely event from the current DB state. This handles the common case where
+/// the model says "yes that order" but forgets to emit the variant field.
+async fn infer_variant_from_state(
+    state: &AppState,
+    order_id: Uuid,
+) -> Option<domain::DomainEventVariant> {
+    use domain::DomainEventVariant::*;
+
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT state FROM order_current_state WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let state_str = row?.0;
+
+    // Map DB state to the most natural next event a worker would send
+    let variant = match state_str.as_str() {
+        "ASSIGNED"              => WorkerAccepted,       // worker saying they accept
+        "ACCEPTED"              => WorkerReadyForPickup, // worker saying they're ready
+        "READY_FOR_PICKUP"      => OrderDone,            // worker saying job done
+        "PENDING_CLARIFICATION" => ClarificationRequested,
+        _ => {
+            tracing::warn!(
+                order_id = %order_id,
+                state = %state_str,
+                "Cannot infer event_variant from state — skipping event"
+            );
+            return None;
+        }
+    };
+
+    tracing::info!(
+        order_id = %order_id,
+        state = %state_str,
+        inferred_variant = ?variant,
+        "Inferred event_variant from order state (Gemini omitted it)"
+    );
+
+    Some(variant)
 }
 
 async fn append_order_event(
