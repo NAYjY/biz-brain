@@ -1,16 +1,10 @@
-//! T05 / P04: one command endpoint per `DomainEvent` variant the Owner can
-//! trigger directly.
+//! Pure order state transition commands — no direct worker messaging.
+//! All routes live under /branches/:branch_id/orders/:order_id/...
 //!
-//! KEY DESIGN: every route that lives under
-//!   /branches/:branch_id/orders/:order_id/...
-//! uses a *typed* `Path<(Uuid, Uuid)>` to extract both ids at once.
-//! `AuthorizedBranch` internally extracts `Path<HashMap<String,String>>`
-//! for the branch ownership check — combining it with a *second* Path
-//! extractor of a *different* type is fine because Axum de-duplicates by
-//! type, but we must not use `Path<HashMap>` twice.
-//!
-//! F04: message_worker and resolve_clarification clear unread count on reply.
-//! F01: set_short_name endpoint added.
+//! F04: message_worker and resolve_clarification clear unread count on reply
+//!      (those live in worker.rs; this file only handles state transitions).
+//! F01: set_short_name and edit_description endpoints.
+//! P16: force-state and reassign-worker endpoints.
 
 use axum::{
     extract::{Path, State},
@@ -20,20 +14,14 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use domain::{BranchId, Channel, ChannelIdentity, DomainEvent, InvoiceId, OrderId, WorkerId};
-use messaging::ChannelAdapter;
+use domain::{BranchId, DomainEvent, OrderId, WorkerId};
 
-use crate::{event_handler, extractors::AuthorizedBranch, state::AppState};
+use crate::{extractors::AuthorizedBranch, state::AppState};
 use crate::routes::orders::{is_unique_violation, validate_short_name};
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
-fn bad_request(msg: impl Into<String>) -> (StatusCode, String) {
-    (StatusCode::BAD_REQUEST, msg.into())
-}
+use super::{append_and_project_order, bad_request, internal, send_message_to_worker};
 
-// ── Assign Worker ─────────────────────────────────────────────────────────── //
+// ── Assign worker ─────────────────────────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]
 pub struct AssignWorkerRequest {
@@ -70,7 +58,7 @@ pub async fn assign_worker(
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
-// ── Close Order ───────────────────────────────────────────────────────────── //
+// ── Close order ───────────────────────────────────────────────────────────── //
 
 /// POST /branches/:branch_id/orders/:order_id/close
 pub async fn close_order(
@@ -82,7 +70,7 @@ pub async fn close_order(
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
-// ── P04: Cancel Order ─────────────────────────────────────────────────────── //
+// ── Cancel order ──────────────────────────────────────────────────────────── //
 
 /// POST /branches/:branch_id/orders/:order_id/cancel
 pub async fn cancel_order(
@@ -94,7 +82,7 @@ pub async fn cancel_order(
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
-// ── P04: Reset Order ──────────────────────────────────────────────────────── //
+// ── Reset order ───────────────────────────────────────────────────────────── //
 
 /// POST /branches/:branch_id/orders/:order_id/reset
 pub async fn reset_order(
@@ -106,11 +94,10 @@ pub async fn reset_order(
     append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await
 }
 
-// ── P16: Force-set state ──────────────────────────────────────────────────── //
+// ── P16: Force-state ──────────────────────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]
 pub struct ForceStateRequest {
-    /// Optional note recorded in the audit trail.
     pub note: Option<String>,
 }
 
@@ -354,11 +341,10 @@ pub async fn edit_description(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── F01: Set / update short name ──────────────────────────────────────────── //
+// ── F01: Set short name ───────────────────────────────────────────────────── //
 
 #[derive(Debug, Deserialize)]
 pub struct SetShortNameRequest {
-    /// Pass null or empty string to clear the short name.
     pub short_name: Option<String>,
 }
 
@@ -369,10 +355,8 @@ pub async fn set_short_name(
     State(state): State<AppState>,
     Json(req): Json<SetShortNameRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // Validate length, strip whitespace, treat blank as clear.
     let short_name = validate_short_name(req.short_name.as_deref())?;
 
-    // Verify the order belongs to this branch and is not deleted.
     let exists: Option<(i32,)> = sqlx::query_as(
         "SELECT 1 FROM orders WHERE id = $1 AND branch_id = $2 AND deleted_at IS NULL",
     )
@@ -386,7 +370,6 @@ pub async fn set_short_name(
         return Err((StatusCode::NOT_FOUND, "order not found".to_string()));
     }
 
-    // Write to source table — unique constraint enforced here.
     sqlx::query(
         "UPDATE orders SET short_name = $1 WHERE id = $2 AND branch_id = $3",
     )
@@ -403,14 +386,12 @@ pub async fn set_short_name(
         }
     })?;
 
-    // Mirror to projection table.
     state
         .projections
         .set_short_name(OrderId::new(order_id), short_name.as_deref())
         .await
         .map_err(internal)?;
 
-    // Notify dashboard clients.
     let meta: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT branch_id FROM orders WHERE id = $1")
             .bind(order_id)
@@ -484,6 +465,7 @@ pub async fn delete_order(
         .fetch_optional(&state.pool)
         .await
         .map_err(internal)?;
+
     if let Some((bid,)) = meta {
         state
             .publish_sse(domain::SseSignal::OrderChanged {
@@ -492,215 +474,6 @@ pub async fn delete_order(
             })
             .await;
     }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ── P04: Resolve Clarification ────────────────────────────────────────────── //
-
-#[derive(Debug, Deserialize)]
-pub struct ResolveClarificationRequest {
-    pub message: String,
-}
-
-/// POST /branches/:branch_id/orders/:order_id/resolve-clarification
-pub async fn resolve_clarification(
-    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
-    State(state): State<AppState>,
-    Json(req): Json<ResolveClarificationRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-        "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
-    )
-    .bind(order_id)
-    .bind(branch_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal)?;
-
-    let worker_id = row
-        .and_then(|(id,)| id)
-        .ok_or_else(|| bad_request("no worker assigned to this order"))?;
-
-    send_message_to_worker(&state, worker_id, &req.message)
-        .await
-        .map_err(internal)?;
-
-    let event = DomainEvent::ClarificationResolved {
-        worker_id: WorkerId::new(worker_id),
-        order_id: OrderId::new(order_id),
-    };
-    append_and_project_order(&state, BranchId::new(branch_id), OrderId::new(order_id), event).await?;
-
-    // F04: Owner resolved clarification — reset unread count.
-    let _ = state.projections.clear_unread(OrderId::new(order_id)).await;
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-// ── Approve Invoice ───────────────────────────────────────────────────────── //
-
-#[derive(Debug, Deserialize)]
-pub struct ApproveInvoiceRequest {
-    pub invoice_id: Uuid,
-}
-
-/// POST /branches/:branch_id/supply-requests/:supply_request_id/approve-invoice
-pub async fn approve_invoice(
-    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path((_branch_id, supply_request_id)): Path<(Uuid, Uuid)>,
-    State(state): State<AppState>,
-    Json(req): Json<ApproveInvoiceRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let supply_request_id = domain::SupplyRequestId::new(supply_request_id);
-
-    let event = DomainEvent::InvoiceApproved {
-        invoice_id: InvoiceId::new(req.invoice_id),
-        branch_id: BranchId::new(branch_id),
-    };
-
-    let seq = state
-        .supply_request_events
-        .current_sequence(supply_request_id)
-        .await
-        .map_err(internal)?;
-
-    state
-        .event_sourcing
-        .append(BranchId::new(branch_id), seq + 1, &event)
-        .await
-        .map_err(internal)?;
-
-    event_handler::fan_out(&state, &event).await;
-
-    let signal = state
-        .projection_worker
-        .project_supply_request(supply_request_id)
-        .await
-        .map_err(internal)?;
-    state.publish_sse(signal).await;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ── Message Worker ────────────────────────────────────────────────────────── //
-
-#[derive(Debug, Deserialize)]
-pub struct MessageWorkerRequest {
-    pub text: String,
-}
-
-/// POST /branches/:branch_id/orders/:order_id/message-worker
-pub async fn message_worker(
-    AuthorizedBranch { branch_id, .. }: AuthorizedBranch,
-    Path((_branch_id, order_id)): Path<(Uuid, Uuid)>,
-    State(state): State<AppState>,
-    Json(req): Json<MessageWorkerRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let text = req.text.trim().to_string();
-    if text.is_empty() {
-        return Err(bad_request("message text required"));
-    }
-
-    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-        "SELECT worker_id FROM order_current_state WHERE order_id = $1 AND branch_id = $2",
-    )
-    .bind(order_id)
-    .bind(branch_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal)?;
-
-    let worker_id = row
-        .and_then(|(id,)| id)
-        .ok_or_else(|| bad_request("no worker assigned to this order"))?;
-
-    send_message_to_worker(&state, worker_id, &text)
-        .await
-        .map_err(internal)?;
-
-    // F04: Owner sent a direct message — reset unread count and low-confidence flag.
-    let _ = state.projections.clear_unread(OrderId::new(order_id)).await;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ── Shared helpers ────────────────────────────────────────────────────────── //
-
-async fn send_message_to_worker(
-    state: &AppState,
-    worker_id: Uuid,
-    text: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT channel, external_id FROM actor_directory \
-         WHERE actor_id = $1 AND actor_type = 'worker' AND owner_confirmed = TRUE",
-    )
-    .bind(worker_id)
-    .fetch_optional(&state.pool)
-    .await?;
-
-    let (channel_str, external_id) =
-        row.ok_or("worker has no confirmed channel binding")?;
-
-    let channel = parse_channel(&channel_str)?;
-    let identity = ChannelIdentity { channel, external_id: external_id.clone() };
-
-    match identity.channel {
-        Channel::Line => state.line.send_push(&identity, text).await?,
-        Channel::WhatsApp => state.whatsapp.send_push(&identity, text).await?,
-        Channel::Telegram => state.telegram.send_push(&identity, text).await?,
-    }
-
-    // F04: persist Owner reply in conversation_history so it appears in the
-    // thread modal alongside the worker's messages. Role = "assistant" matches
-    // the convention used by inbox_worker for bot replies.
-    let sender_key = store::conversation_history::ConversationHistoryRepository::sender_key(
-        &channel_str,
-        &external_id,
-    );
-    let history_repo =
-        store::conversation_history::ConversationHistoryRepository::new(state.pool.clone());
-    let _ = history_repo.append(&sender_key, "assistant", text).await;
-
-    Ok(())
-}
-
-async fn append_and_project_order(
-    state: &AppState,
-    branch_id: BranchId,
-    order_id: OrderId,
-    event: DomainEvent,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let seq = state
-        .order_events
-        .current_sequence(order_id)
-        .await
-        .map_err(internal)?;
-
-    state
-        .event_sourcing
-        .append(branch_id, seq + 1, &event)
-        .await
-        .map_err(internal)?;
-
-    event_handler::fan_out(state, &event).await;
-
-    let signal = state
-        .projection_worker
-        .project_order(order_id)
-        .await
-        .map_err(internal)?;
-    state.publish_sse(signal).await;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-fn parse_channel(s: &str) -> Result<Channel, Box<dyn std::error::Error>> {
-    match s {
-        "line" => Ok(Channel::Line),
-        "whats_app" => Ok(Channel::WhatsApp),
-        "telegram" => Ok(Channel::Telegram),
-        other => Err(format!("unknown channel: {other}").into()),
-    }
 }
